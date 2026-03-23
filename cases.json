@@ -1,0 +1,193 @@
+{
+  "CASE-2203-6534": {
+    "case_id": "CASE-2203-6534",
+    "reporter": "917303507585",
+    "animal": "Cow",
+    "severity": 10,
+    "location": "https://maps.google.com/?q=28.7003705,77.1230712",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "time_reported": "22 Mar 2026, 06:39 PM",
+    "time_accepted": "22 Mar 2026, 06:41 PM",
+    "time_completed": "22 Mar 2026, 06:44 PM"
+  },
+  "CASE-2203-5321": {
+    "case_id": "CASE-2203-5321",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 9,
+    "location": "https://maps.google.com/?q=28.700377,77.1230628",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "time_reported": "22 Mar 2026, 06:57 PM",
+    "time_accepted": "22 Mar 2026, 06:59 PM",
+    "time_completed": "22 Mar 2026, 06:59 PM"
+  },
+  "CASE-2203-6217": {
+    "case_id": "CASE-2203-6217",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 9,
+    "location": "https://maps.google.com/?q=28.700362,77.1230732",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "time_reported": "22 Mar 2026, 07:19 PM",
+    "time_accepted": "22 Mar 2026, 11:06 PM",
+    "time_completed": "22 Mar 2026, 11:09 PM",
+    "volunteer_number": "917303507585"
+  },
+  "CASE-2203-9913": {
+    "case_id": "CASE-2203-9913",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 9,
+    "location": "https://maps.google.com/?q=28.7003821,77.1230534",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "time_reported": "22 Mar 2026, 07:31 PM",
+    "time_accepted": "22 Mar 2026, 07:32 PM",
+    "time_completed": "22 Mar 2026, 07:35 PM"
+  },
+  "CASE-2203-3452": {
+    "case_id": "CASE-2203-3452",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 8,
+    "location": "https://maps.google.com/?q=28.7003877,77.12306",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": null,
+    "volunteer_number": null,
+    "time_reported": "22 Mar 2026, 08:22 PM",
+    "time_accepted": null,
+    "time_completed": "22 Mar 2026, 08:23 PM"
+  },
+  "CASE-2203-6313": {
+    "case_id": "CASE-2203-6313",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 8,
+    "location": "https://maps.google.com/?q=28.7003697,77.1230835",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "volunteer_number": "917303507585",
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "22 Mar 2026, 11:05 PM",
+    "time_accepted": "22 Mar 2026, 11:27 PM",
+    "time_completed": "22 Mar 2026, 11:28 PM"
+  },
+  "CASE-2203-6134": {
+    "case_id": "CASE-2203-6134",
+    "reporter": "917303507585",
+    "animal": "Cow",
+    "severity": 8,
+    "location": "https://maps.google.com/?q=28.70037,77.1230702",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": null,
+    "volunteer_number": null,
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "22 Mar 2026, 11:26 PM",
+    "time_accepted": null,
+    "time_completed": "22 Mar 2026, 11:40 PM"
+  },
+  "CASE-2203-8328": {
+    "case_id": "CASE-2203-8328",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 8,
+    "location": "https://maps.google.com/?q=28.7003685,77.1230723",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "volunteer_number": "917303507585",
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "22 Mar 2026, 11:50 PM",
+    "time_accepted": "22 Mar 2026, 11:51 PM",
+    "time_completed": "22 Mar 2026, 11:52 PM"
+  },
+  "CASE-2303-4817": {
+    "case_id": "CASE-2303-4817",
+    "reporter": "919212798939",
+    "animal": "Cow",
+    "severity": 9,
+    "location": "https://maps.google.com/?q=28.7003784,77.1230628",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "volunteer_number": "917303507585",
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "23 Mar 2026, 12:46 AM",
+    "time_accepted": "23 Mar 2026, 12:47 AM",
+    "time_completed": "23 Mar 2026, 12:48 AM"
+  },
+  "CASE-2303-5847": {
+    "case_id": "CASE-2303-5847",
+    "reporter": "919212798939",
+    "animal": "Cow",
+    "severity": 9,
+    "location": "https://maps.google.com/?q=28.7003682,77.1230695",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "PENDING",
+    "volunteer": null,
+    "volunteer_number": null,
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "23 Mar 2026, 01:06 AM",
+    "time_accepted": null,
+    "time_completed": null
+  },
+  "CASE-2403-1222": {
+    "case_id": "CASE-2403-1222",
+    "reporter": "917303507585",
+    "animal": "Dog",
+    "severity": 10,
+    "location": "https://maps.google.com/?q=28.7003775,77.1230631",
+    "bleeding": "NO",
+    "can_move": "NO",
+    "urgency": "HIGH",
+    "status": "COMPLETED",
+    "volunteer": "Dhruv Rangan",
+    "volunteer_number": "917303507585",
+    "alerted_volunteers": [
+      "917303507585"
+    ],
+    "time_reported": "24 Mar 2026, 12:10 AM",
+    "time_accepted": "24 Mar 2026, 12:11 AM",
+    "time_completed": "24 Mar 2026, 12:12 AM"
+  }
+}
