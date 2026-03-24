@@ -5,3 +5,8 @@ google-generativeai
 groq
 python-dotenv
 gunicorn
+opencv-python-headless
+ultralytics
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
