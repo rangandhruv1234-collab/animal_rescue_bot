@@ -1,11 +1,2 @@
 [phases.setup]
 nixPkgs = ["libGL", "libxcb"]
-
-[phases.install]
-cmds = [
-  "pip install opencv-python-headless==4.8.1.78",
-  "pip install flask requests pillow google-generativeai groq python-dotenv gunicorn",
-  "pip install --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision",
-  "pip install ultralytics --no-deps",
-  "pip install ultralytics"
-]
