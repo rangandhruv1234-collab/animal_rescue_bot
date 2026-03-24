@@ -1,9 +1,9 @@
 flask
 requests
-ultralytics
 pillow
 google-generativeai
 groq
 python-dotenv
 gunicorn
 opencv-python-headless
+ultralytics
