@@ -1,0 +1,6 @@
+[phases.install]
+cmds = [
+  "pip install flask requests pillow google-generativeai groq python-dotenv gunicorn ultralytics",
+  "pip uninstall -y opencv-python",
+  "pip install opencv-python-headless"
+]
