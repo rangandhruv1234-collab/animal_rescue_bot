@@ -1,4 +1,8 @@
-﻿from flask import Flask, request
+import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+os.environ["MPLBACKEND"] = "Agg"
+os.environ["DISPLAY"] = ""
+from flask import Flask, request
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
 from ultralytics import YOLO
