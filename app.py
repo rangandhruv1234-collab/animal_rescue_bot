@@ -1,4 +1,6 @@
 ﻿from flask import Flask, request
+import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
 from ultralytics import YOLO
 import google.generativeai as genai
 from groq import Groq
