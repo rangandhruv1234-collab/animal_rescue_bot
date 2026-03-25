@@ -1,2 +1,1 @@
-[phases.setup]
-nixPkgs = ["libGL", "libxcb", "xorg.libxcb", "xorg.libX11"]
+
