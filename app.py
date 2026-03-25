@@ -5,7 +5,6 @@ os.environ["DISPLAY"] = ""
 from flask import Flask, request
 import os
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
-from ultralytics import YOLO
 import google.generativeai as genai
 from groq import Groq
 from preprocess import smartcrop_all_animals
@@ -29,7 +28,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # LOAD AI MODELS
-yolo_model = YOLO("yolov8n.pt")
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 groq_client = Groq(api_key=GROQ_API_KEY)
