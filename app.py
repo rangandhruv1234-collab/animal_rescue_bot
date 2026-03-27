@@ -35,7 +35,6 @@ waiting_reporters = {}
 active_cases = {}
 pending_volunteer_responses = {}
 pending_outcome = {}
-pending_upi = {}
 
 def load_volunteers():
     if os.path.exists(VOLUNTEER_DB):
@@ -280,9 +279,6 @@ def clear_reporter_session(sender):
         del waiting_reporters[sender]
     print(f"Session cleared for {sender}")
 
-# ─────────────────────────────────────────
-# FIRST AID — includes STAY/LEAVE at end
-# ─────────────────────────────────────────
 def send_first_aid(sender, session):
     animal = session.get("animal", "animal").lower()
     bleeding = session.get("bleeding", "NO")
@@ -298,7 +294,6 @@ def send_first_aid(sender, session):
 
     if bleeding == "YES":
         tips.append("🩸 If bleeding: Apply gentle pressure with a clean cloth. Do not remove it.")
-
     if can_move == "NO":
         tips.append("🚫 Do not try to lift or drag the animal — this can cause more injury.")
 
@@ -335,6 +330,9 @@ def send_first_aid(sender, session):
         f"Reply LEAVE if you need to go."
     )
 
+# ─────────────────────────────────────────
+# HANDLE VOLUNTEER RESPONDING
+# ─────────────────────────────────────────
 def handle_responding(sender, volunteer_name, case_data):
     reporter = case_data["reporter"]
     case_id_found = case_data["case_id"]
@@ -361,9 +359,7 @@ def handle_responding(sender, volunteer_name, case_data):
         f"📋 Case ID: {case_id_found}\n"
         f"📍 Location: {location}\n"
         f"Reporter contact: +{reporter}\n"
-        f"{reporter_present}\n\n"
-        f"When rescue is complete:\n"
-        f"COMPLETED {case_id_found}"
+        f"{reporter_present}"
     )
     send_message(reporter,
         f"🐾 A volunteer has accepted your case!\n\n"
@@ -372,11 +368,39 @@ def handle_responding(sender, volunteer_name, case_data):
         "They are heading to the location.\n"
         "You can contact them directly if needed."
     )
+    # Ask volunteer for outcome note while heading to rescue
+    pending_outcome[sender] = {"case_id": case_id_found, "note": None}
+    send_message(sender,
+        "📝 While you're heading there — please send a brief note about the outcome once rescue is done:\n\n"
+        "Example:\n"
+        "\"Taken to vet on MG Road, stable\"\n"
+        "\"Given water, recovering on site\"\n"
+        "\"Animal had already passed\"\n\n"
+        "Send your note anytime, then type:\n"
+        f"COMPLETED {case_id_found}"
+    )
     if sender in active_cases:
         del active_cases[sender]
     if sender in pending_volunteer_responses:
         del pending_volunteer_responses[sender]
     print(f"Volunteer {sender} assigned to case {case_id_found}")
+
+# ─────────────────────────────────────────
+# HANDLE OUTCOME NOTE FROM VOLUNTEER
+# ─────────────────────────────────────────
+def handle_outcome_note(sender, text):
+    data = pending_outcome.get(sender)
+    if not data or not isinstance(data, dict):
+        return False
+    data["note"] = text.strip()
+    pending_outcome[sender] = data
+    send_message(sender,
+        f"✅ Note saved.\n\n"
+        f"When rescue is complete:\n"
+        f"COMPLETED {data['case_id']}"
+    )
+    print(f"Outcome note saved for {data['case_id']}: {text.strip()}")
+    return True
 
 def connect_reporter_volunteer(reporter, volunteer_number, volunteer_name):
     case_data = pending_volunteer_responses.get(volunteer_number, {})
@@ -533,145 +557,66 @@ def handle_status(sender, text):
         msg += f"\n📝 Outcome: \"{case['outcome']}\""
     send_message(sender, msg)
 
+# ─────────────────────────────────────────
+# HANDLE COMPLETED
+# ─────────────────────────────────────────
 def handle_completed(sender, text):
     cases = load_cases()
     parts = text.strip().upper().replace(" -", "-").replace("- ", "-").split()
     if len(parts) < 2:
         send_message(sender,
             "Please include the Case ID.\n"
-            "Example: COMPLETED CASE-2203-XXXX\n\n"
-            "Check the rescue alert message for your Case ID."
+            "Example: COMPLETED CASE-2203-XXXX"
         )
         return
     case_id = parts[1]
     if case_id not in cases:
-        send_message(sender, f"Case {case_id} not found. Please check your Case ID.")
+        send_message(sender, f"Case {case_id} not found.")
         return
     case = cases[case_id]
     if case["status"] == "COMPLETED":
-        send_message(sender, f"Case {case_id} is already marked as completed.")
+        send_message(sender, f"Case {case_id} is already completed.")
         return
+
+    # Get saved note if exists
+    outcome_data = pending_outcome.get(sender, {})
+    note = outcome_data.get("note", None) if isinstance(outcome_data, dict) else None
+
     case["status"] = "COMPLETED"
     case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    if note:
+        case["outcome"] = note
     save_cases(cases)
-    pending_outcome[sender] = case_id
+
+    if sender in pending_outcome:
+        del pending_outcome[sender]
+
     send_message(sender,
         f"✅ Case {case_id} marked as completed.\n"
-        "Thank you for your service 🐾\n\n"
-        "One last step — please share a brief outcome note:\n\n"
-        "Example:\n"
-        "\"Taken to vet on MG Road, stable\"\n"
-        "\"Given water, recovering on site\"\n"
-        "\"Animal had already passed\"\n"
-        "\"False alarm — no animal found\"\n\n"
-        "Type anything and it will be shared with the reporter."
+        "Thank you for your service 🐾\n"
+        "You made a real difference today 💚"
     )
 
-def handle_outcome_note(sender, text):
-    case_id = pending_outcome.get(sender)
-    if not case_id:
-        return False
-    cases = load_cases()
-    if case_id not in cases:
-        del pending_outcome[sender]
-        return True
-    case = cases[case_id]
-    case["outcome"] = text.strip()
-    save_cases(cases)
-    del pending_outcome[sender]
     reporter = case["reporter"]
     clear_reporter_session(reporter)
-    send_message(reporter,
-        f"🐾 Your rescue case has been completed.\n\n"
-        f"Case ID: {case_id}\n"
-        f"Volunteer's note: \"{text.strip()}\"\n\n"
-        "Thank you for reporting and helping save an animal.\n"
-        "You made a difference today 💚"
-    )
-    send_message(sender,
-        "✅ Outcome noted. Thank you for making a difference today 💚\n\n"
-        "You can check any case anytime:\n"
-        "STATUS CASE-XXXX"
-    )
-    print(f"Outcome saved for {case_id}: {text.strip()}")
-    return True
 
-def analyze_with_gemini(crop_path, user_answers):
-    img = PIL.Image.open(crop_path)
-    prompt = f"""
-You are an animal rescue triage assistant.
-
-A person has reported an injured animal with the following information:
-{user_answers}
-
-Look at this image and answer:
-1. What animal do you see?
-2. Does the image support the reporter's description?
-3. How serious does this look on a scale of 1-10?
-4. What specific signs of distress or injury do you see?
-5. What is your urgency recommendation: HIGH, MEDIUM or LOW?
-
-Be concise and direct. This is an emergency system.
-"""
-    response = gemini_model.generate_content([prompt, img])
-    print("GEMINI RESPONSE:", response.text)
-    return response.text
-
-def extract_urgency(gemini_response):
-    text = gemini_response.upper()
-    if "HIGH" in text:
-        return "HIGH"
-    elif "MEDIUM" in text:
-        return "MEDIUM"
-    return "LOW"
-
-def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
-    volunteers = load_volunteers()
-    if not volunteers:
-        print("No volunteers registered yet")
-        return
-    severity = session.get("severity", "?")
-    animal = session.get("animal", "Unknown")
-    bleeding = session.get("bleeding", "?")
-    can_move = session.get("can_move", "?")
-    ground_support = session.get("ground_support", "?")
-    support_number = session.get("support_number", "None")
-    location = session.get("location", "Not shared")
-    if urgency == "HIGH":
-        urgency_line = "🔴 URGENT — IMMEDIATE RESPONSE NEEDED"
-    elif urgency == "MEDIUM":
-        urgency_line = "🟡 MEDIUM — RESPOND SOON"
+    if note:
+        send_message(reporter,
+            f"🐾 Your rescue case has been completed.\n\n"
+            f"Case ID: {case_id}\n"
+            f"Volunteer's note: \"{note}\"\n\n"
+            "Thank you for reporting and helping save an animal.\n"
+            "You made a difference today 💚"
+        )
     else:
-        urgency_line = "🟢 LOW — MONITOR SITUATION"
-    message = (
-        f"🚨 RESCUE ALERT 🚨\n"
-        f"{urgency_line}\n\n"
-        f"📋 Case ID: {case_id}\n\n"
-        f"Animal: {animal}\n"
-        f"Severity (reported): {severity}/10\n"
-        f"Bleeding: {bleeding}\n"
-        f"Can move: {can_move}\n"
-        f"Ground support: {ground_support}\n"
-        f"Support contact: {support_number}\n"
-        f"📍 Location: {location}\n\n"
-        f"AI Analysis:\n{gemini_analysis}\n\n"
-        f"Reported by: +{sender}\n\n"
-        f"Reply RESPONDING to accept this case.\n"
-        f"When done: COMPLETED {case_id}\n"
-        f"⚠️ Other animals may be nearby — stay alert"
-    )
-    alerted = []
-    for vol_number in volunteers:
-        send_message(vol_number, message)
-        send_photo_to_volunteer(vol_number)
-        active_cases[vol_number] = {"reporter": sender, "case_id": case_id}
-        alerted.append(vol_number)
-        print(f"Alerted volunteer: {vol_number}")
-    cases = load_cases()
-    if case_id in cases:
-        cases[case_id]["alerted_volunteers"] = alerted
-        save_cases(cases)
-    start_escalation_timer(case_id)
+        send_message(reporter,
+            f"🐾 Your rescue case has been completed.\n\n"
+            f"Case ID: {case_id}\n\n"
+            "Thank you for reporting and helping save an animal.\n"
+            "You made a difference today 💚"
+        )
+
+    print(f"Case {case_id} completed by {sender}")
 
 def process_answer(sender, text):
     session = user_sessions.get(sender, {})
@@ -868,6 +813,82 @@ def process_answer(sender, text):
             "Genuine emergency only. Reply YES to proceed."
         )
 
+def analyze_with_gemini(crop_path, user_answers):
+    img = PIL.Image.open(crop_path)
+    prompt = f"""
+You are an animal rescue triage assistant.
+
+A person has reported an injured animal with the following information:
+{user_answers}
+
+Look at this image and answer:
+1. What animal do you see?
+2. Does the image support the reporter's description?
+3. How serious does this look on a scale of 1-10?
+4. What specific signs of distress or injury do you see?
+5. What is your urgency recommendation: HIGH, MEDIUM or LOW?
+
+Be concise and direct. This is an emergency system.
+"""
+    response = gemini_model.generate_content([prompt, img])
+    print("GEMINI RESPONSE:", response.text)
+    return response.text
+
+def extract_urgency(gemini_response):
+    text = gemini_response.upper()
+    if "HIGH" in text:
+        return "HIGH"
+    elif "MEDIUM" in text:
+        return "MEDIUM"
+    return "LOW"
+
+def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
+    volunteers = load_volunteers()
+    if not volunteers:
+        print("No volunteers registered yet")
+        return
+    severity = session.get("severity", "?")
+    animal = session.get("animal", "Unknown")
+    bleeding = session.get("bleeding", "?")
+    can_move = session.get("can_move", "?")
+    ground_support = session.get("ground_support", "?")
+    support_number = session.get("support_number", "None")
+    location = session.get("location", "Not shared")
+    if urgency == "HIGH":
+        urgency_line = "🔴 URGENT — IMMEDIATE RESPONSE NEEDED"
+    elif urgency == "MEDIUM":
+        urgency_line = "🟡 MEDIUM — RESPOND SOON"
+    else:
+        urgency_line = "🟢 LOW — MONITOR SITUATION"
+    message = (
+        f"🚨 RESCUE ALERT 🚨\n"
+        f"{urgency_line}\n\n"
+        f"📋 Case ID: {case_id}\n\n"
+        f"Animal: {animal}\n"
+        f"Severity (reported): {severity}/10\n"
+        f"Bleeding: {bleeding}\n"
+        f"Can move: {can_move}\n"
+        f"Ground support: {ground_support}\n"
+        f"Support contact: {support_number}\n"
+        f"📍 Location: {location}\n\n"
+        f"AI Analysis:\n{gemini_analysis}\n\n"
+        f"Reported by: +{sender}\n\n"
+        f"Reply RESPONDING to accept this case.\n"
+        f"⚠️ Other animals may be nearby — stay alert"
+    )
+    alerted = []
+    for vol_number in volunteers:
+        send_message(vol_number, message)
+        send_photo_to_volunteer(vol_number)
+        active_cases[vol_number] = {"reporter": sender, "case_id": case_id}
+        alerted.append(vol_number)
+        print(f"Alerted volunteer: {vol_number}")
+    cases = load_cases()
+    if case_id in cases:
+        cases[case_id]["alerted_volunteers"] = alerted
+        save_cases(cases)
+    start_escalation_timer(case_id)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
@@ -893,7 +914,7 @@ def webhook():
                     handle_completed(sender, text)
                     return "OK", 200
 
-                # ── OUTCOME NOTE ──
+                # ── OUTCOME NOTE FROM VOLUNTEER ──
                 if sender in pending_outcome:
                     handled = handle_outcome_note(sender, text)
                     if handled:
@@ -920,8 +941,7 @@ def webhook():
                         f"✅ Welcome {text}!\n\n"
                         "You are now registered as a rescue volunteer.\n"
                         "You will receive alerts when animals need help.\n\n"
-                        "When you receive an alert, reply RESPONDING to accept.\n"
-                        "When rescue is done, reply COMPLETED CASE-XXXX"
+                        "When you receive an alert, reply RESPONDING to accept."
                     )
                     return "OK", 200
 
@@ -976,7 +996,8 @@ def webhook():
 
                 # ── COMPLETION PHOTO FROM VOLUNTEER ──
                 if sender in volunteers and sender in pending_outcome:
-                    case_id = pending_outcome.get(sender)
+                    outcome_data = pending_outcome.get(sender, {})
+                    case_id = outcome_data.get("case_id") if isinstance(outcome_data, dict) else None
                     if case_id:
                         completion_photo_path = f"completion_{case_id}.jpg"
                         image_id = message["image"]["id"]
@@ -1066,7 +1087,7 @@ def webhook():
                 session["stage"] = "waiting"
                 user_sessions[sender] = session
 
-                # ── First aid + STAY/LEAVE at end ──
+                # ── First aid + STAY/LEAVE ──
                 send_first_aid(sender, session)
 
                 # ── Alert volunteers ──
