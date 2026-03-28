@@ -18,7 +18,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
 from groq import Groq
-from preprocess import smartcrop_all_animals
+
 import requests
 import PIL.Image
 import json
@@ -738,8 +738,8 @@ def handle_completed(sender, text):
 # GEMINI
 # ════════════════════════════════════════════════════════════
 
-def analyze_with_gemini(crop_path, user_answers):
-    img    = PIL.Image.open(crop_path)
+def analyze_with_gemini(image_path, user_answers):
+    img    = PIL.Image.open(image_path)
     prompt = (
         "You are an animal rescue triage assistant.\n\n"
         f"Reporter info:\n{user_answers}\n\n"
@@ -1059,10 +1059,6 @@ def webhook():
 
             send_message(sender, "📸 Photo received. Sending to rescue team...")
             download_image(get_image_url(message["image"]["id"]))
-            found = smartcrop_all_animals("received.jpg")
-            if not found:
-                send_message(sender, "❓ No animal detected. Send a clearer photo.")
-                return "OK", 200
 
             user_answers = (
                 f"Animal: {session.get('animal','?')}\n"
@@ -1075,7 +1071,7 @@ def webhook():
                 f"Behavior: {session.get('behavior','?')}\n"
                 f"Ground support: {session.get('ground_support','?')}"
             )
-            gemini_analysis = analyze_with_gemini(found[0]["crop_path"], user_answers)
+            gemini_analysis = analyze_with_gemini("received.jpg", user_answers)
             urgency         = extract_urgency(gemini_analysis)
             case_id         = create_case(sender, session, urgency)
 
