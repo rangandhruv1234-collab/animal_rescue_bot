@@ -464,14 +464,14 @@ Return ONLY the value. Nothing else.
 # ════════════════════════════════════════════════════════════
 
 ALL_QUESTION_MAP = {
-    "animal":        ("animal",  "Which animal?\n1.Dog 2.Cat 3.Cow 4.Horse 5.Other"),
-    "bleeding":      ("yes_no",  "Is it bleeding? (YES/NO)"),
-    "can_move":      ("yes_no",  "Can it move? (YES/NO)"),
-    "wounds":        ("yes_no",  "Visible wounds? (YES/NO)"),
-    "eating":        ("yes_no",  "Eating/drinking? (YES/NO)"),
-    "duration":      ("text",    "How long has it been there?"),
-    "behavior":      ("text",    "Aggressive or calm?"),
-    "ground_support":("yes_no",  "Anyone with the animal?\nYES — share number\nNO"),
+    "animal":        ("animal",  "Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
+    "bleeding":      ("yes_no",  "Is the animal bleeding?\n\nReply YES or NO"),
+    "can_move":      ("yes_no",  "Can the animal move on its own?\n\nReply YES or NO"),
+    "wounds":        ("yes_no",  "Are there any visible wounds or injuries?\n\nReply YES or NO"),
+    "eating":        ("yes_no",  "Is the animal eating or drinking?\n\nReply YES or NO"),
+    "duration":      ("text",    "How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
+    "behavior":      ("text",    "Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious)"),
+    "ground_support":("yes_no",  "Is there anyone with the animal right now?\n\nYES — please share their WhatsApp number\nNO — rescuer will be dispatched urgently"),
 }
 
 INVALID_LOCATION_WORDS = [
@@ -490,24 +490,30 @@ def get_next_question(session):
     severity = session.get("severity", 0)
     answered = session.get("answered", [])
     base = [
-        ("animal",   "animal", "Which animal?\n1.Dog 2.Cat 3.Cow 4.Horse 5.Other — specify"),
-        ("bleeding", "yes_no", "Is it bleeding? (YES/NO)"),
-        ("can_move", "yes_no", "Can it move? (YES/NO)"),
+        ("animal",   "animal", "Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
+        ("bleeding", "yes_no", "Is the animal bleeding?\n\nReply YES or NO"),
+        ("can_move", "yes_no", "Can the animal move on its own?\n\nReply YES or NO"),
     ]
     moderate = [
-        ("wounds",   "yes_no", "Visible wounds? (YES/NO)"),
-        ("eating",   "yes_no", "Eating/drinking? (YES/NO)"),
-        ("duration", "text",   "How long has it been there?"),
+        ("wounds",   "yes_no", "Are there any visible wounds or injuries?\n\nReply YES or NO"),
+        ("eating",   "yes_no", "Is the animal eating or drinking?\n\nReply YES or NO"),
+        ("duration", "text",   "How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
     ]
-    mild_extra = moderate + [("behavior","text","Aggressive or calm?")]
+    mild_extra = moderate + [("behavior","text","Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious)")]
     support  = ("ground_support","yes_no",
-                "Anyone with the animal?\nYES — share their number\nNO — rescuer dispatched urgently")
+                "Is there anyone with the animal right now?\n\n"
+                "YES — please share their WhatsApp number\n"
+                "NO — our rescuer will be dispatched urgently")
     location = ("location","text",
-                "Share location 📍\n\n"
-                "Option 1: Tap 📎 → Location → Share Live Location\n\n"
-                "Option 2: Type address:\n"
-                "Area + landmark + city\n"
-                "Example: Near Sector 5 Metro, Rohini, New Delhi")
+                "Please share the exact location of the animal 📍\n\n"
+                "Option 1 — Live location (recommended):\n"
+                "Tap the 📎 attachment icon\n"
+                "→ Select Location\n"
+                "→ Share Live Location\n\n"
+                "Option 2 — Type address:\n"
+                "Include area name + landmark + city\n\n"
+                "Example: Near Sector 5 Metro, Rohini, New Delhi\n\n"
+                "⚠️ Accurate location = faster rescue.")
 
     if   severity >= 7: all_q = base + [support] + [location]
     elif severity >= 4: all_q = base + moderate   + [support] + [location]
@@ -516,7 +522,14 @@ def get_next_question(session):
     for key, qtype, question in all_q:
         if key not in answered:
             return key, qtype, question
-    return "photo","text","Send a clear photo of the animal 📸"
+    return "photo","text",(
+        "Almost done! Please send a clear photo of the animal 📸\n\n"
+        "Tips:\n"
+        "• Get as close as safely possible\n"
+        "• Make sure the animal is clearly in frame\n"
+        "• Good lighting helps our AI analyse the injury\n\n"
+        "Send the photo now 👇"
+    )
 
 
 def advance_to_next(sender, session):
@@ -582,7 +595,7 @@ def handle_responding(sender, volunteer_name, case_data):
     case_id_found = case_data["case_id"]
     case          = load_case(case_id_found)
     if not case:
-        send_message(sender, "Case not found.")
+        send_message(sender, "Case not found. Please check your rescue alert and try again.")
         return
 
     case["status"]           = "ACCEPTED"
@@ -708,7 +721,7 @@ def handle_completed(sender, text):
         send_message(sender, f"Case {case_id} not found.")
         return
     if case["status"] == "COMPLETED":
-        send_message(sender, f"Case {case_id} already completed.")
+        send_message(sender, f"Case {case_id} is already marked as completed. Thank you for your service! 🐾")
         return
 
     note = pending_outcome.get(sender, {})
@@ -722,7 +735,10 @@ def handle_completed(sender, text):
     increment_rescues(sender)
 
     send_message(sender,
-        f"✅ Case {case_id} completed.\nThank you 🐾\nYou made a real difference today 💚"
+        f"✅ Case {case_id} has been marked as completed.\n\n"
+        "Thank you for showing up today. 🐾\n\n"
+        "Every rescue you complete is logged on the Animitr leaderboard.\n"
+        "You made a real difference to an animal that had no voice. 💚"
     )
     reporter = case["reporter"]
     clear_reporter_session(reporter)
@@ -807,7 +823,12 @@ def process_answer(sender, text):
         if interpret_answer("yes_no", text) == "YES":
             session["stage"] = "severity"
             save_session(sender, session)
-            send_message(sender, "Severity 1-10?\n(1=minor, 10=critical)")
+            send_message(sender,
+                "On a scale of 1 to 10, how serious is the animal's condition?\n\n"
+                "1 = Minor injury, alert but moving\n"
+                "5 = Moderate, needs attention soon\n"
+                "10 = Critical, life threatening\n\n"
+                "Please reply with a number between 1 and 10.")
         else:
             send_message(sender,
                 "🚨 ANIMAL RESCUE SYSTEM 🚨\n\n"
@@ -824,7 +845,14 @@ def process_answer(sender, text):
                 session.update({"severity":severity,"stage":"questions","answered":[],"unclear_count":0})
                 save_session(sender, session)
                 level = "CRITICAL" if severity>=7 else "MODERATE" if severity>=4 else "MILD"
-                send_message(sender, f"Severity {severity}/10 — {level}\n\nWhich animal?\n1.Dog 2.Cat 3.Cow 4.Horse 5.Other")
+                send_message(sender,
+                    f"Severity {severity}/10 — {level}\n\n"
+                    "Which animal is it?\n\n"
+                    "1. Dog\n"
+                    "2. Cat\n"
+                    "3. Cow\n"
+                    "4. Horse\n"
+                    "5. Other — please specify")
                 session["answered"].append("animal")
                 session["pending_key"]   = "animal"
                 session["pending_qtype"] = "animal"
@@ -851,7 +879,7 @@ def process_answer(sender, text):
                 else:
                     save_session(sender, session)
                     _, q = ALL_QUESTION_MAP.get(pending_key, ("text","Clarify?"))
-                    send_message(sender, f"Didn't understand.\n\n{q}")
+                    send_message(sender, f"Sorry, I didn't quite understand your answer.\n\nCould you please clarify?\n\n{q}")
                 return
             session["unclear_count"] = 0
             if pending_key == "animal":
@@ -895,14 +923,26 @@ def process_answer(sender, text):
     elif stage == "location":
         if not is_valid_location(text):
             send_message(sender,
-                "⚠️ Location not accepted.\nInclude area + landmark + city.\n"
-                "Example: Near Sector 5 Metro, Rohini, New Delhi"
+                "⚠️ Location not accepted.\n\n"
+                "Please provide a proper address that includes:\n"
+                "• Area or colony name\n"
+                "• Nearby landmark or street name\n"
+                "• City name\n\n"
+                "Example: Near Sector 5 Metro, Rohini, New Delhi\n\n"
+                "Accurate location = faster rescue. Please try again:"
             )
             return
         session["location"] = text.strip()
         session["stage"]    = "photo"
         save_session(sender, session)
-        send_message(sender, "📍 Location noted!\n\nSend a clear photo of the animal 📸")
+        send_message(sender,
+            "📍 Location confirmed!\n\n"
+            "Now please send a clear photo of the animal.\n\n"
+            "Tips for a good photo:\n"
+            "• Get as close as safely possible\n"
+            "• Make sure the animal is clearly visible\n"
+            "• Good lighting helps the AI analyse the injury better\n\n"
+            "Send the photo now 📸")
 
     elif stage == "waiting":
         interpreted = interpret_answer("yes_no", text)
@@ -975,7 +1015,10 @@ def webhook():
                 session = load_session(sender)
                 session["stage"] = "volunteer_name"
                 save_session(sender, session)
-                send_message(sender, "🐾 Welcome! Enter your full name to register:")
+                send_message(sender,
+                "🐾 Welcome to the Animal Rescue Volunteer Network!\n\n"
+                "Thank you for choosing to make a difference.\n\n"
+                "Please enter your full name to complete registration:")
                 return "OK", 200
 
             session = load_session(sender)
@@ -984,9 +1027,13 @@ def webhook():
                 delete_session(sender)
                 send_message(sender,
                     f"✅ Welcome {text}!\n\n"
-                    "Registered as rescue volunteer.\n"
-                    "Reply RESPONDING to accept alerts.\n"
-                    "COMPLETED CASE-XXXX when done."
+                    "You are now registered as an Animitr rescue volunteer. 🐾\n\n"
+                    "When you receive a rescue alert:\n"
+                    "→ Reply RESPONDING to accept the case\n\n"
+                    "When the rescue is complete:\n"
+                    "→ Reply COMPLETED CASE-XXXX\n\n"
+                    "You will receive WhatsApp alerts when animals near you need help.\n"
+                    "Thank you for joining. You are going to save lives. 💚"
                 )
                 return "OK", 200
 
@@ -997,9 +1044,15 @@ def webhook():
                     if cd and isinstance(cd, dict):
                         handle_responding(sender, vols[sender]["name"], cd)
                     else:
-                        send_message(sender, "No active case. Wait for an alert.")
+                        send_message(sender,
+                        "No active rescue case found for your number.\n\n"
+                        "Please wait for a rescue alert to come through.\n"
+                        "You will be notified when an animal needs help in your area.")
                 else:
-                    send_message(sender, "Not registered. Text JOIN.")
+                    send_message(sender,
+                        "You are not registered as a volunteer.\n\n"
+                        "To join the rescue network, reply:\n"
+                        "JOIN")
                 return "OK", 200
 
             if not session_exists(sender):
@@ -1075,14 +1128,28 @@ def webhook():
             urgency         = extract_urgency(gemini_analysis)
             case_id         = create_case(sender, session, urgency)
 
-            send_message(sender, f"📋 Case ID: {case_id}\nTrack: STATUS {case_id}")
+            send_message(sender,
+                f"📋 Your Case ID: {case_id}\n\n"
+                "Please save this. You can check status anytime by replying:\n"
+                f"STATUS {case_id}")
 
-            dispatch_msg = {
-                "HIGH":   "✅ Dispatched. Help on the way!\n🙏 Your presence helps.",
-                "MEDIUM": "✅ Dispatched. Volunteer responding soon.",
-                "LOW":    "✅ Noted. Volunteer will check when available.",
-            }
-            send_message(sender, dispatch_msg.get(urgency, "✅ Report submitted."))
+            if urgency == "HIGH":
+                send_message(sender,
+                    "🚨 HIGH URGENCY case created.\n\n"
+                    "Your report has been dispatched to our rescue team.\n"
+                    "Help is on the way.\n\n"
+                    "🙏 This is a serious case — your presence with the animal\n"
+                    "can make a real difference while the volunteer reaches you.")
+            elif urgency == "MEDIUM":
+                send_message(sender,
+                    "✅ Your report has been dispatched to our rescue team.\n\n"
+                    "A volunteer will respond to you soon.\n"
+                    "Please stay close to the animal if possible.")
+            else:
+                send_message(sender,
+                    "✅ Your report has been noted and sent to our rescue team.\n\n"
+                    "A volunteer will check on the animal when available.\n"
+                    "Thank you for reporting.")
 
             session["stage"] = "waiting"
             save_session(sender, session)
@@ -1218,10 +1285,14 @@ def api_register_volunteer():
         save_volunteer(phone, name, city, tier)
         send_message(phone,
             f"🐾 Welcome to Animitr, {name}!\n\n"
-            "You're registered as a rescue volunteer.\n\n"
-            "When you get an alert → Reply RESPONDING\n"
-            "When rescue done → COMPLETED CASE-XXXX\n\n"
-            "Thank you. You're going to save lives 💚"
+            "You are now registered as a rescue volunteer.\n\n"
+            "How it works:\n"
+            "→ You will receive WhatsApp alerts when an animal needs help near you\n"
+            "→ Reply RESPONDING to accept a case\n"
+            "→ Rescue the animal\n"
+            "→ Reply COMPLETED CASE-XXXX when done\n\n"
+            "Your rescue count is tracked on our public leaderboard.\n\n"
+            "Thank you for joining. You are going to save lives. 💚"
         )
         return jsonify({"success": True})
     except Exception as e:
