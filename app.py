@@ -103,7 +103,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sessions (
             phone_number TEXT PRIMARY KEY,
             stage        TEXT DEFAULT 'warning',
-            data         TEXT DEFAULT '{}',
+            session_data TEXT DEFAULT '{}',
             updated_at   TIMESTAMP DEFAULT NOW()
         );
     """)
@@ -264,14 +264,14 @@ def create_case(reporter, session, urgency):
 def load_session(phone):
     conn = get_db()
     cur  = conn.cursor()
-    cur.execute("SELECT data FROM sessions WHERE phone_number = %s;", (phone,))
+    cur.execute("SELECT session_data FROM sessions WHERE phone_number = %s;", (phone,))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row:
         return {}
     try:
-        return json.loads(row["data"])
+        return json.loads(row["session_data"])
     except:
         return {}
 
@@ -280,11 +280,11 @@ def save_session(phone, data):
     conn = get_db()
     cur  = conn.cursor()
     cur.execute("""
-        INSERT INTO sessions (phone_number, stage, data, updated_at)
+        INSERT INTO sessions (phone_number, stage, session_data, updated_at)
         VALUES (%s, %s, %s, NOW())
         ON CONFLICT (phone_number) DO UPDATE SET
-            stage      = EXCLUDED.stage,
-            data       = EXCLUDED.data,
+            stage        = EXCLUDED.stage,
+            session_data = EXCLUDED.session_data,
             updated_at = NOW();
     """, (phone, data.get("stage","warning"), json.dumps(data)))
     conn.commit()
