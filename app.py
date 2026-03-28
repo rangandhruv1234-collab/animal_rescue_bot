@@ -59,6 +59,9 @@ waiting_reporters           = {}
 active_cases                = {}
 pending_volunteer_responses = {}
 pending_outcome             = {}
+pending_transfer            = {}   # volunteer_phone → {case_id, warned_at, urgency}
+pending_completion_photo    = {}   # volunteer_phone → {case_id, note, deadline_timer}
+pending_reporter_confirm    = {}   # reporter_phone  → {case_id, volunteer_name, vol_phone}
 message_timestamps          = {}
 
 
@@ -74,13 +77,14 @@ def init_db():
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS volunteers (
-            phone_number   TEXT PRIMARY KEY,
-            name           TEXT NOT NULL,
-            status         TEXT DEFAULT 'active',
-            city           TEXT,
-            tier           TEXT,
-            total_rescues  INTEGER DEFAULT 0,
-            registered_at  TIMESTAMP DEFAULT NOW()
+            phone_number    TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            status          TEXT DEFAULT 'active',
+            city            TEXT,
+            tier            TEXT,
+            total_rescues   INTEGER DEFAULT 0,
+            photo_warnings  INTEGER DEFAULT 0,
+            registered_at   TIMESTAMP DEFAULT NOW()
         );""")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS volunteer_applications (
@@ -155,6 +159,49 @@ def increment_rescues(phone):
     conn = get_db(); cur = conn.cursor()
     cur.execute("UPDATE volunteers SET total_rescues=total_rescues+1 WHERE phone_number=%s;", (phone,))
     conn.commit(); cur.close(); conn.close()
+
+def add_photo_warning(phone):
+    """Add a photo warning to volunteer. Auto-ban at 5 warnings."""
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""
+        UPDATE volunteers SET photo_warnings = photo_warnings + 1
+        WHERE phone_number = %s
+        RETURNING photo_warnings, name;
+    """, (phone,))
+    row = cur.fetchone(); conn.commit(); cur.close(); conn.close()
+    if not row: return
+    warnings = row["photo_warnings"]
+    name     = row["name"]
+    print(f"Photo warning {warnings}/5 for {name} ({phone})")
+    if warnings >= 5:
+        # Auto-ban
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE volunteers SET status='banned' WHERE phone_number=%s;", (phone,))
+        conn.commit(); cur.close(); conn.close()
+        send_message(phone,
+            "🚫 Your Animitr volunteer account has been permanently banned.\n\n"
+            "You have failed to provide a completion photo 5 times.\n\n"
+            "This is a mandatory requirement for all volunteers.\n\n"
+            "If you believe this is an error, contact:\ncontact.animitr@gmail.com"
+        )
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"🚫 AUTO-BAN: {name} (+{phone})\n"
+                "Reason: 5 completion photo warnings reached."
+            )
+    else:
+        remaining = 5 - warnings
+        send_message(phone,
+            f"⚠️ Photo Warning {warnings}/5\n\n"
+            "You did not send a completion photo for your last rescue case.\n\n"
+            f"You have {remaining} warning{'s' if remaining > 1 else ''} remaining before your account is banned.\n\n"
+            "All future rescues REQUIRE a completion photo before the case can close."
+        )
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"⚠️ PHOTO WARNING {warnings}/5: {name} (+{phone})\n"
+                "Did not submit completion photo."
+            )
 
 
 # ── APPLICATIONS CRUD ─────────────────────────────────────────────
@@ -405,12 +452,17 @@ def recover_state_from_db():
                 elif status == "ACCEPTED" and row["time_accepted"]:
                     accepted_at = datetime.strptime(row["time_accepted"], "%d %b %Y, %I:%M %p")
                     elapsed = (now - accepted_at).total_seconds()
-                    timeout = 2700 if urgency == "HIGH" else 5400
-                    remaining = timeout - elapsed
+                    # New timings: warn at 10min HIGH (600s) or 25min MEDIUM/LOW (1500s)
+                    warn_after = 600 if urgency == "HIGH" else 1500
+                    remaining = warn_after - elapsed
                     if remaining > 0:
-                        start_acceptance_timeout(case_id, vol_number or "unknown", urgency, int(remaining))
+                        # Warning hasn't fired yet — restart with remaining time
+                        t = threading.Timer(int(remaining), warn_ghost_volunteer, args=[case_id])
+                        t.daemon = True; t.start()
+                        print(f"Recovered ghost warning: {case_id} in {int(remaining)}s")
                     else:
-                        threading.Thread(target=reopen_stale_case, args=[case_id], daemon=True).start()
+                        # Warning overdue — fire immediately
+                        threading.Thread(target=warn_ghost_volunteer, args=[case_id], daemon=True).start()
             except Exception as e:
                 print(f"Timer recovery error {case_id}: {e}")
         print(f"Recovery complete. {len(rows)} cases processed.")
@@ -493,54 +545,176 @@ def escalate_case(case_id):
             f"⚠️ Update on {case_id}:\nAll volunteers alerted.\n\n📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027\n\nPlease contact them directly while we keep trying."
         )
 
-def reopen_stale_case(case_id):
-    # P5 FIX: Ghost volunteer timeout — reopen to other volunteers
+def warn_ghost_volunteer(case_id):
+    """
+    P5 — STEP 1: Warning shot before transfer.
+    Fires after 10 min (HIGH) or 25 min (MEDIUM/LOW) of ACCEPTED with no COMPLETED.
+    Sends volunteer a 2-minute warning. If they reply anything within 2 min → grace.
+    If silent → reopen_stale_case() fires.
+    """
     case = load_case(case_id)
-    if not case or case["status"] != "ACCEPTED": return
+    if not case or case["status"] != "ACCEPTED":
+        return  # Already completed or reopened — do nothing
+
+    vol_num  = case.get("volunteer_number")
+    vol_name = case.get("volunteer", "Volunteer")
+    urgency  = case.get("urgency", "MEDIUM")
+
+    print(f"Ghost warning sent: {case_id} → {vol_name} ({vol_num})")
+
+    # Mark case as "transfer_pending" so we can detect if they reply
+    # We use pending_transfer dict (in-memory) keyed by volunteer phone
+    pending_transfer[vol_num] = {
+        "case_id":   case_id,
+        "warned_at": datetime.now().isoformat(),
+        "urgency":   urgency,
+    }
+
+    send_message(vol_num,
+        f"⚠️ CASE UPDATE REQUIRED — {case_id}\n\n"
+        f"You accepted this rescue {10 if urgency == 'HIGH' else 25} minutes ago "
+        f"and no completion has been logged.\n\n"
+        "Your case is being transferred in 2 minutes unless you reply.\n\n"
+        "Reply anything right now to keep the case:\n"
+        "• STILL_ON_SCENE — if you are still at location\n"
+        f"• COMPLETED {case_id} — if rescue is done\n"
+        "• Your outcome note — to log progress\n\n"
+        "⏳ You have 2 minutes."
+    )
+
+    # Start 2-minute final countdown → reopen if still no reply
+    t = threading.Timer(120, reopen_stale_case, args=[case_id])
+    t.daemon = True
+    t.start()
+    print(f"Transfer countdown started: {case_id} in 120s")
+
+
+def reopen_stale_case(case_id):
+    """
+    P5 — STEP 2: Actually transfer the case.
+    Called after the 2-minute grace period expires with no reply.
+    Also called directly if volunteer never replied to the initial warning.
+    """
+    case = load_case(case_id)
+    if not case or case["status"] != "ACCEPTED":
+        return  # Case was completed during grace period — do nothing
+
     stale_vol = case.get("volunteer", "The volunteer")
     stale_num = case.get("volunteer_number")
+    urgency   = case.get("urgency", "MEDIUM")
     print(f"Reopening stale case {case_id} — {stale_vol} ghosted")
-    case["status"] = "PENDING"; case["volunteer"] = None
-    case["volunteer_number"] = None; case["time_accepted"] = None
+
+    # Clean up transfer warning state
+    pending_transfer.pop(stale_num, None)
+
+    # Reset case to PENDING
+    case["status"]           = "PENDING"
+    case["volunteer"]        = None
+    case["volunteer_number"] = None
+    case["time_accepted"]    = None
     save_case(case)
+
     if stale_num:
-        active_cases.pop(stale_num, None); pending_outcome.pop(stale_num, None)
+        active_cases.pop(stale_num, None)
+        pending_outcome.pop(stale_num, None)
         send_message(stale_num,
-            f"⚠️ Case {case_id} has been reassigned.\n\n"
-            "You did not complete this rescue within the expected time.\n"
-            "The case is being reopened to other volunteers."
+            f"🔄 Case {case_id} has been transferred to another volunteer.\n\n"
+            "You did not respond within the time window.\n\n"
+            f"If you are still at the scene, please text RESPONDING to re-accept\n"
+            f"or COMPLETED {case_id} if the rescue is already done."
         )
+
     send_message(case["reporter"],
-        f"🔄 Update on {case_id}:\n\nOur volunteer has been unable to complete the rescue in time.\n"
-        "We are alerting backup volunteers now. Help is still on the way."
+        f"🔄 Update on {case_id}:\n\n"
+        "Our volunteer was unable to complete the rescue in time.\n"
+        "We are alerting backup volunteers now. Help is still on the way.\n\n"
+        "We apologise for the delay."
     )
+
+    # Re-alert all other volunteers
     volunteers = load_volunteers()
     for vol in volunteers:
-        if vol == stale_num: continue
+        if vol == stale_num:
+            continue
         send_message(vol,
-            f"🔄 REACTIVATED CASE — {case_id}\n\nPrevious volunteer did not complete rescue.\n\n"
-            f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n📍 {case['location']}\n\n"
-            "Reply RESPONDING if you can help now."
+            f"🔄 REACTIVATED CASE — {case_id}\n\n"
+            f"Previous volunteer did not respond in time.\n\n"
+            f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
+            f"📍 {case['location']}\n\n"
+            f"Reply RESPONDING if you can help now.\nWhen done: COMPLETED {case_id}"
         )
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
-    start_escalation_timer(case_id, 600)
+
+    # Fresh escalation timer for the reopened case
+    start_escalation_timer(case_id, delay_seconds=600)
+
     if ADMIN_NUMBER:
         send_message(ADMIN_NUMBER,
-            f"⚠️ GHOST VOLUNTEER: Case {case_id} reopened.\n"
-            f"Ghost: {stale_vol} (+{stale_num})\nAnimal: {case['animal']} at {case['location']}"
+            f"⚠️ GHOST VOLUNTEER: Case {case_id} transferred.\n"
+            f"Ghost: {stale_vol} (+{stale_num})\n"
+            f"Animal: {case['animal']} | {urgency}\n"
+            f"Location: {case['location']}"
         )
+
+
+def handle_still_on_scene(sender, case_id):
+    """
+    Volunteer replied STILL_ON_SCENE during grace period.
+    Give them one extension — same as original timeout duration.
+    One extension only — no infinite stalling.
+    """
+    case = load_case(case_id)
+    if not case or case["status"] != "ACCEPTED":
+        send_message(sender, f"Case {case_id} is no longer active.")
+        return
+
+    urgency = case.get("urgency", "MEDIUM")
+
+    # Clear the transfer warning
+    pending_transfer.pop(sender, None)
+
+    send_message(sender,
+        f"✅ Got it. You have been given a one-time extension.\n\n"
+        f"Extension time: {'10 minutes' if urgency == 'HIGH' else '25 minutes'}\n\n"
+        "Please complete the rescue and send:\n"
+        f"COMPLETED {case_id}\n\n"
+        "No further extensions will be given after this."
+    )
+
+    send_message(case["reporter"],
+        f"🔄 Update on {case_id}:\n\n"
+        "Your volunteer has confirmed they are still at the scene.\n"
+        "The rescue is in progress."
+    )
+
+    # One final timeout — no more warnings after this, goes straight to reopen
+    extension = 600 if urgency == "HIGH" else 1500  # 10min / 25min
+    t = threading.Timer(extension, reopen_stale_case, args=[case_id])
+    t.daemon = True
+    t.start()
+    print(f"Extension granted: {case_id} ({urgency}) → {extension}s")
+
 
 def start_escalation_timer(case_id, delay_seconds=600):
     t = threading.Timer(delay_seconds, escalate_case, args=[case_id])
     t.daemon = True; t.start()
     print(f"Escalation timer: {case_id} in {delay_seconds}s")
 
+
 def start_acceptance_timeout(case_id, volunteer_name, urgency, delay_seconds=None):
+    """
+    P5 FIX — New timing:
+      HIGH urgency:   10 minutes → warn → 2 min grace → transfer
+      MEDIUM/LOW:     25 minutes → warn → 2 min grace → transfer
+    After warn_ghost_volunteer fires, a 2-minute timer starts automatically.
+    Total worst case: HIGH = 12 min, MEDIUM/LOW = 27 min before transfer.
+    """
     if delay_seconds is None:
-        delay_seconds = 2700 if urgency == "HIGH" else 5400
-    t = threading.Timer(delay_seconds, reopen_stale_case, args=[case_id])
-    t.daemon = True; t.start()
-    print(f"Acceptance timeout: {case_id} ({volunteer_name}) in {delay_seconds}s")
+        delay_seconds = 600 if urgency == "HIGH" else 1500  # 10min / 25min
+    t = threading.Timer(delay_seconds, warn_ghost_volunteer, args=[case_id])
+    t.daemon = True
+    t.start()
+    print(f"Acceptance timeout ({urgency}): {case_id} — {delay_seconds}s until warning")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -687,14 +861,38 @@ def handle_responding(sender, volunteer_name, case_data):
     send_message(sender,
         f"✅ Case accepted — you are now the assigned rescuer.\n\n"
         f"📋 {case_id_found}\n📍 {case['location']}\nAnimal: {case['animal']} | Severity: {case['severity']}/10\n"
-        f"Reporter: +{reporter}\n{rp_text}\n\n📝 Send an outcome note anytime, then:\nCOMPLETED {case_id_found}"
+        f"Reporter: +{reporter}\n{rp_text}\n\n"
+        f"📝 Send an outcome note anytime, then:\nCOMPLETED {case_id_found}\n\n"
+        f"⚠️ You MUST send a completion photo when done.\nThis is mandatory for all Animitr volunteers."
     )
+
+    # Reporter priming message 1 — immediate on volunteer accepting
     send_message(reporter,
-        f"🐾 A volunteer has accepted your rescue case!\n\nVolunteer: {volunteer_name}\nContact: +{sender}\n\n"
-        "They are heading to the location now.\nYou will be notified when the rescue is complete."
+        f"🐾 A volunteer has accepted your rescue case!\n\n"
+        f"Volunteer: {volunteer_name}\nContact: +{sender}\n\n"
+        "They are heading to the location now.\n\n"
+        "📌 Important: When the rescue is complete, you will receive a photo "
+        "from the volunteer. Please stay available — we will ask you to confirm "
+        "that the animal looks safe. Your confirmation matters. 🐾"
     )
+
     pending_outcome[sender] = {"case_id": case_id_found, "note": None}
     active_cases.pop(sender, None); pending_volunteer_responses.pop(sender, None)
+
+    # Reporter priming message 2 — 15 minutes into rescue
+    def send_reminder():
+        # Only send if case is still active
+        c = load_case(case_id_found)
+        if c and c["status"] == "ACCEPTED":
+            send_message(reporter,
+                f"🔔 Reminder for case {case_id_found}:\n\n"
+                "Your rescue is in progress.\n\n"
+                "When complete, you will receive a photo from the volunteer. "
+                "Please reply YES or NO when asked if the animal looks safe.\n\n"
+                "Your response helps us verify every rescue. Thank you."
+            )
+    t = threading.Timer(900, send_reminder); t.daemon = True; t.start()
+
     # P5 FIX: Start ghost volunteer timeout
     start_acceptance_timeout(case_id_found, volunteer_name, case.get("urgency","MEDIUM"))
 
@@ -707,7 +905,225 @@ def handle_outcome_note(sender, text):
     data["note"] = note; pending_outcome[sender] = data
     send_message(sender, f"✅ Note saved.\nWhen done: COMPLETED {data['case_id']}"); return True
 
-def connect_reporter_volunteer(reporter, volunteer_number, volunteer_name):
+def handle_photo_deadline(vol_phone, case_id):
+    """
+    30 minutes passed after COMPLETED — volunteer never sent photo.
+    Issue warning, admin alert. Case still closes but rescue count not incremented.
+    """
+    if vol_phone not in pending_completion_photo:
+        return  # Photo was received — deadline no longer relevant
+    data = pending_completion_photo.pop(vol_phone, {})
+    if data.get("case_id") != case_id:
+        return
+
+    print(f"Photo deadline missed: {case_id} by {vol_phone}")
+    case = load_case(case_id)
+    if not case or case["status"] == "COMPLETED":
+        return
+
+    # Close case WITHOUT incrementing rescue count
+    note = data.get("note")
+    case["status"]         = "COMPLETED"
+    case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    if note: case["outcome"] = note
+    save_case(case)
+    pending_outcome.pop(vol_phone, None)
+
+    # Issue photo warning — auto-ban at 5
+    add_photo_warning(vol_phone)
+
+    # Notify reporter with flag
+    reporter = case["reporter"]
+    send_message(reporter,
+        f"🐾 Your rescue case {case_id} has been closed.\n\n"
+        "Note: The volunteer did not provide a completion photo.\n"
+        "Our admin team has been alerted and will follow up.\n\n"
+        "If the animal did not receive help, please reply NO to this message."
+    )
+    pending_reporter_confirm[reporter] = {
+        "case_id":       case_id,
+        "volunteer_name": case.get("volunteer","Volunteer"),
+        "vol_phone":     vol_phone,
+        "photo_missing": True,
+    }
+
+    if ADMIN_NUMBER:
+        send_message(ADMIN_NUMBER,
+            f"⚠️ PHOTO MISSING: {case_id}\n"
+            f"Volunteer: {case.get('volunteer')} (+{vol_phone})\n"
+            f"Animal: {case['animal']} at {case['location']}\n"
+            "Rescue count NOT incremented. Admin review required."
+        )
+
+    # Schedule photo cleanup (nothing to delete but keep consistent)
+    threading.Timer(300, delete_case_photos, args=[case_id]).start()
+
+
+def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
+    """
+    Called after Gemini photo comparison is done.
+    Closes the case, sends reporter the photo and confirmation question.
+    """
+    case = load_case(case_id)
+    if not case or case["status"] == "COMPLETED":
+        return
+
+    case["status"]         = "COMPLETED"
+    case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    case["completion_photo"] = True
+    if note: case["outcome"] = note
+    save_case(case)
+    pending_outcome.pop(vol_phone, None)
+
+    reporter     = case["reporter"]
+    vol_name     = case.get("volunteer", "Volunteer")
+    completion_p = f"completion_{case_id}.jpg"
+
+    # Thank the volunteer
+    send_message(vol_phone,
+        f"✅ Case {case_id} — completion photo received.\n\n"
+        "Thank you for showing up and for documenting the rescue. 🐾\n\n"
+        "The reporter will confirm and your rescue count will be updated.\n\n"
+        "You made a real difference. 💚"
+    )
+
+    # Forward completion photo to reporter with confirmation question
+    upload_and_send_photo(reporter, completion_p,
+        f"📸 Your volunteer {vol_name} has completed the rescue for case {case_id}."
+    )
+    send_message(reporter,
+        f"🐾 Rescue update for case {case_id}:\n\n"
+        f"Volunteer {vol_name} has marked this rescue as complete "
+        "and sent the photo above.\n\n"
+        "Please confirm:\n"
+        "✅ Reply YES — animal looks safe and rescued\n"
+        "❌ Reply NO — something looks wrong\n"
+        "❓ Reply UNSURE — you cannot tell\n\n"
+        "Your reply helps us verify every rescue. Thank you."
+    )
+
+    # Store confirmation state for reporter
+    pending_reporter_confirm[reporter] = {
+        "case_id":        case_id,
+        "volunteer_name": vol_name,
+        "vol_phone":      vol_phone,
+        "photo_result":   photo_result,
+        "was_accepted":   was_accepted,
+        "photo_missing":  False,
+    }
+
+    # If Gemini flagged NO_MATCH, alert admin immediately too
+    if photo_result == "NO_MATCH":
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"🚨 PHOTO MISMATCH: {case_id}\n"
+                f"Volunteer: {vol_name} (+{vol_phone})\n"
+                f"Gemini says completion photo does NOT match report photo.\n"
+                f"Animal: {case['animal']} at {case['location']}\n"
+                "Waiting for reporter confirmation."
+            )
+
+    # P4: Increment rescue count only if ACCEPTED→COMPLETED with photo provided
+    # Tentatively increment now — will reverse if reporter says NO
+    if was_accepted:
+        increment_rescues(vol_phone)
+
+    # Schedule 2-hour reporter confirmation deadline
+    threading.Timer(7200, handle_reporter_confirmation_deadline,
+                    args=[reporter, case_id, vol_phone, was_accepted]).start()
+
+    # Schedule photo deletion after 2 hours regardless of outcome
+    threading.Timer(7200, delete_case_photos, args=[case_id]).start()
+
+    print(f"Case {case_id} closed. Photo result: {photo_result}. Waiting for reporter confirm.")
+
+
+def handle_reporter_confirmation(reporter, reply):
+    """
+    Reporter replied YES / NO / UNSURE to completion confirmation.
+    """
+    data = pending_reporter_confirm.pop(reporter, None)
+    if not data:
+        return False  # Not in confirmation state
+
+    case_id      = data["case_id"]
+    vol_phone    = data["vol_phone"]
+    vol_name     = data["volunteer_name"]
+    was_accepted = data.get("was_accepted", True)
+    photo_missing = data.get("photo_missing", False)
+
+    reply_up = reply.strip().upper()
+
+    if reply_up == "YES" or "YES" in reply_up:
+        send_message(reporter,
+            f"✅ Thank you for confirming.\n\n"
+            f"Case {case_id} is now fully verified.\n\n"
+            "Your report saved an animal today. 🐾"
+        )
+        # All good — rescue count already incremented in finalize_case_closure
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"✅ CONFIRMED: {case_id} — Reporter verified rescue.\nVolunteer: {vol_name}"
+            )
+        clear_reporter_session(reporter)
+        return True
+
+    elif reply_up == "NO" or "NO" in reply_up:
+        send_message(reporter,
+            f"⚠️ Thank you for letting us know.\n\n"
+            "Our admin team has been alerted and will investigate immediately.\n\n"
+            "If the animal is still in danger, please call:\n"
+            "📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027"
+        )
+        # Reverse rescue count — this rescue was fraudulent
+        if was_accepted and not photo_missing:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE volunteers SET total_rescues = GREATEST(total_rescues - 1, 0)
+                WHERE phone_number = %s;
+            """, (vol_phone,))
+            conn.commit(); cur.close(); conn.close()
+            print(f"Rescue count reversed for {vol_phone} — reporter denied.")
+
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"🚨 REPORTER DENIED RESCUE: {case_id}\n"
+                f"Volunteer: {vol_name} (+{vol_phone})\n"
+                "Rescue count REVERSED. Immediate investigation required.\n"
+                f"Use REMOVE_VOL {vol_phone} if fraud confirmed."
+            )
+        clear_reporter_session(reporter)
+        return True
+
+    elif "UNSURE" in reply_up:
+        send_message(reporter,
+            f"Understood. We have logged your uncertainty for case {case_id}.\n\n"
+            "Our team will review the case. Thank you for responding."
+        )
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"❓ REPORTER UNSURE: {case_id}\n"
+                f"Volunteer: {vol_name} (+{vol_phone})\n"
+                "Manual review recommended."
+            )
+        clear_reporter_session(reporter)
+        return True
+
+    return False  # Unknown reply — not handled
+
+
+def handle_reporter_confirmation_deadline(reporter, case_id, vol_phone, was_accepted):
+    """Reporter didn't reply to confirmation within 2 hours."""
+    if reporter in pending_reporter_confirm:
+        pending_reporter_confirm.pop(reporter, None)
+        print(f"Reporter {reporter} didn't confirm case {case_id} — flagging to admin")
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"⏰ NO REPORTER REPLY: {case_id}\n"
+                f"Reporter (+{reporter}) did not confirm rescue within 2 hours.\n"
+                "Case remains closed. Rescue count stands. Manual review if needed."
+            )
+        clear_reporter_session(reporter)
     cd = pending_volunteer_responses.get(volunteer_number, {})
     case_id_found = cd.get("case_id") if isinstance(cd, dict) else None
     if not case_id_found:
@@ -759,7 +1175,11 @@ def handle_status(sender, text):
     send_message(sender, msg)
 
 def handle_completed(sender, text):
-    # P3 + P4 FIX: Auth check + only count if properly ACCEPTED→COMPLETED
+    """
+    P3 + P4 FIX: Auth check.
+    NEW: Don't close case immediately. Ask volunteer for completion photo first.
+    Case only closes after photo is received, compared, and reporter confirms.
+    """
     parts = text.strip().upper().replace(" -","-").replace("- ","-").split()
     if len(parts) < 2:
         send_message(sender, "Include Case ID.\nExample: COMPLETED CASE-XXXX"); return
@@ -768,36 +1188,46 @@ def handle_completed(sender, text):
         send_message(sender, f"Case {case_id} not found."); return
     if case["status"] == "COMPLETED":
         send_message(sender, f"Case {case_id} is already completed. 🐾"); return
+
     is_assigned = (case.get("volunteer_number") == sender)
     is_reporter  = (case.get("reporter") == sender)
+
     if not is_assigned and not is_reporter:
         send_message(sender, "❌ You are not authorized to complete this case.\nOnly the assigned volunteer can mark a rescue complete."); return
+
     if is_reporter and not is_assigned:
         if case["status"] == "ACCEPTED":
             try:
-                accepted_at = datetime.strptime(case["time_accepted"], "%d %b %Y, %I:%M %p")
+                accepted_at   = datetime.strptime(case["time_accepted"], "%d %b %Y, %I:%M %p")
                 hours_elapsed = (datetime.now() - accepted_at).total_seconds() / 3600
             except: hours_elapsed = 0
             if hours_elapsed < 3:
                 send_message(sender, "⏳ A volunteer is still assigned to your case.\nPlease wait for them to complete the rescue."); return
+
+    # Save note from pending_outcome
     note_data = pending_outcome.get(sender, {})
-    note = note_data.get("note") if isinstance(note_data, dict) else None
-    was_accepted = (case["status"] == "ACCEPTED")
-    case["status"] = "COMPLETED"; case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    if note: case["outcome"] = note
-    save_case(case); pending_outcome.pop(sender, None)
-    # P4 FIX: Only increment if properly ACCEPTED→COMPLETED by assigned volunteer
-    if is_assigned and was_accepted: increment_rescues(sender)
+    note      = note_data.get("note") if isinstance(note_data, dict) else None
+
+    # ── NEW: Request completion photo before closing ──────────────
+    # Put case in awaiting_photo state
+    pending_completion_photo[sender] = {
+        "case_id":     case_id,
+        "note":        note,
+        "was_accepted": (case["status"] == "ACCEPTED"),
+    }
+
     send_message(sender,
-        f"✅ Case {case_id} marked as completed.\n\nThank you for showing up today. 🐾\n\n"
-        "Every rescue you complete is logged on the Animitr leaderboard.\nYou made a real difference to an animal that had no voice. 💚"
+        f"✅ Almost done — one last step.\n\n"
+        f"Please send a photo of the animal NOW to close case {case_id}.\n\n"
+        "📸 This is mandatory for all Animitr volunteers.\n"
+        "It proves the rescue happened and reassures the reporter.\n\n"
+        "Send the photo within 30 minutes or the case will be flagged."
     )
-    reporter = case["reporter"]
-    reporter_msg = f"🐾 Your rescue case is complete.\n\nCase ID: {case_id}\n"
-    if note: reporter_msg += f"Volunteer note: \"{note}\"\n\n"
-    reporter_msg += "Thank you for reporting and helping save an animal. 💚"
-    send_message(reporter, reporter_msg); clear_reporter_session(reporter)
-    print(f"Case {case_id} completed by {sender}")
+
+    # Start 30-minute photo deadline timer
+    t = threading.Timer(1800, handle_photo_deadline, args=[sender, case_id])
+    t.daemon = True; t.start()
+    print(f"Photo deadline started: {case_id} — 30min")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -811,12 +1241,59 @@ def analyze_with_gemini(image_path, user_answers):
             "You are an animal rescue triage assistant.\n\n"
             f"Reporter info:\n{user_answers}\n\n"
             "From the image:\n1. Animal seen?\n2. Matches description?\n3. Severity 1-10?\n"
-            "4. Signs of distress?\n5. Urgency: HIGH / MEDIUM / LOW?\n\nBe concise."
+            "4. Signs of distress?\n5. Urgency: HIGH / MEDIUM / LOW?\n\n"
+            "IMPORTANT: Your entire response must be under 480 characters. "
+            "Be extremely concise. No filler words. Facts only."
         )
         response = gemini_model.generate_content([prompt, img])
         print("GEMINI:", response.text[:120]); return response.text
     except Exception as e:
         print(f"Gemini error: {e}"); return "AI analysis unavailable. Urgency: HIGH"
+
+
+def compare_photos_with_gemini(report_path, completion_path):
+    """
+    Compare the original report photo with the volunteer's completion photo.
+    Returns: 'MATCH' | 'NO_MATCH' | 'UNCERTAIN'
+    """
+    try:
+        report_img     = PIL.Image.open(report_path)
+        completion_img = PIL.Image.open(completion_path)
+        prompt = (
+            "You are verifying an animal rescue.\n\n"
+            "Image 1 is the ORIGINAL photo sent when the animal was reported injured.\n"
+            "Image 2 is the COMPLETION photo sent by the volunteer after the rescue.\n\n"
+            "Answer these two questions:\n"
+            "1. Do both images appear to show the same animal? "
+            "(Same species, similar markings, same injury location if visible)\n"
+            "2. Does the animal in Image 2 appear to be in a safer or better situation? "
+            "(Being held, in a vehicle, at a clinic, or visibly attended to)\n\n"
+            "Reply with ONLY one word:\n"
+            "MATCH — same animal, appears helped\n"
+            "NO_MATCH — different animal or clearly unrelated photo\n"
+            "UNCERTAIN — cannot determine clearly"
+        )
+        response = gemini_model.generate_content([prompt, report_img, completion_img])
+        result = response.text.strip().upper()
+        print(f"Gemini photo compare: {result}")
+        if "NO_MATCH" in result:   return "NO_MATCH"
+        if "UNCERTAIN" in result:  return "UNCERTAIN"
+        return "MATCH"
+    except Exception as e:
+        print(f"Gemini photo compare error: {e}")
+        return "UNCERTAIN"
+
+
+def delete_case_photos(case_id):
+    """Delete report and completion photos after case closes. Privacy compliance."""
+    import os
+    for path in [f"report_{case_id}.jpg", f"completion_{case_id}.jpg"]:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"Deleted: {path}")
+        except Exception as e:
+            print(f"Photo delete error {path}: {e}")
 
 def extract_urgency(text):
     t = text.upper()
@@ -829,12 +1306,16 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
     if not volunteers:
         send_message(sender, "⚠️ No volunteers registered yet.\n\n📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027"); return
     line = ("🔴 URGENT — IMMEDIATE RESPONSE" if urgency=="HIGH" else "🟡 MEDIUM — RESPOND SOON" if urgency=="MEDIUM" else "🟢 LOW — MONITOR SITUATION")
+
+    # Gemini is prompted to stay under 480 chars so the full alert stays well within WhatsApp's 4096 limit.
+    ai_text = gemini_analysis
+
     message = (
         f"🚨 RESCUE ALERT 🚨\n{line}\n\n📋 Case ID: {case_id}\n\n"
         f"Animal: {session.get('animal','?')}\nSeverity: {session.get('severity','?')}/10\n"
         f"Bleeding: {session.get('bleeding','?')}\nCan move: {session.get('can_move','?')}\n"
         f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
-        f"AI Analysis:\n{gemini_analysis}\n\nReported by: +{sender}\n\n"
+        f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}\n\n"
         f"Reply RESPONDING to accept.\nWhen done: COMPLETED {case_id}"
     )
     alerted = []
@@ -869,6 +1350,9 @@ def handle_admin_command(text):
             f"✅ Welcome to Animitr, {app['name']}!\n\nYour application has been approved.\n\n"
             "You will now receive rescue alerts.\n\nCommands:\n"
             "RESPONDING — accept a case\nCOMPLETED CASE-XXXX — close a case\nVSTATUS — check your status\n\n"
+            "⚠️ MANDATORY REQUIREMENT:\nAfter every rescue, you MUST send a photo of the animal "
+            "before the case closes. This is non-negotiable.\n"
+            "5 missed completion photos = permanent ban from the network.\n\n"
             "Thank you for joining. You are going to save lives. 💚"
         )
         return f"✅ Approved: {app['name']} (+{target})"
@@ -1087,6 +1571,41 @@ def webhook():
             if text_up.startswith("COMPLETED"):
                 handle_completed(sender, text); return "OK", 200
 
+            # ── REPORTER CONFIRMATION (YES/NO/UNSURE after completion photo) ──
+            if sender in pending_reporter_confirm:
+                if handle_reporter_confirmation(sender, text):
+                    return "OK", 200
+
+            # ── GRACE PERIOD INTERCEPT ─────────────────────────────────────
+            # Volunteer is in the 2-minute transfer window — any reply saves them
+            if sender in pending_transfer:
+                transfer_data = pending_transfer[sender]
+                cid = transfer_data.get("case_id")
+                urgency = transfer_data.get("urgency", "MEDIUM")
+
+                if text_up == "STILL_ON_SCENE":
+                    handle_still_on_scene(sender, cid)
+                elif text_up.startswith("COMPLETED"):
+                    # Let handle_completed() run normally — it will mark case done
+                    pending_transfer.pop(sender, None)
+                    handle_completed(sender, text)
+                else:
+                    # Any other reply = they are active. Ask for proper update.
+                    pending_transfer.pop(sender, None)
+                    send_message(sender,
+                        f"✅ Confirmed — you are still active on case {cid}.\n\n"
+                        "Please send us an update:\n"
+                        "• STILL_ON_SCENE — still at location, rescue in progress\n"
+                        f"• COMPLETED {cid} — rescue is complete\n"
+                        "• Your outcome note (e.g. 'Taken to vet, stable')\n\n"
+                        f"Case will be monitored. Complete with: COMPLETED {cid}"
+                    )
+                    # Restart the full timeout from scratch — one more chance
+                    extension = 600 if urgency == "HIGH" else 1500
+                    t = threading.Timer(extension, warn_ghost_volunteer, args=[cid])
+                    t.daemon = True; t.start()
+                return "OK", 200
+
             if sender in pending_outcome:
                 if not text_up.startswith("COMPLETED") and not text_up.startswith("STATUS"):
                     if handle_outcome_note(sender, text): return "OK", 200
@@ -1133,16 +1652,43 @@ def webhook():
 
         elif message["type"] == "image":
             session = load_session(sender); vols = load_volunteers()
+
+            # ── COMPLETION PHOTO from volunteer awaiting photo submission ──
+            if sender in pending_completion_photo:
+                data    = pending_completion_photo.pop(sender, {})
+                cid     = data.get("case_id")
+                note    = data.get("note")
+                was_acc = data.get("was_accepted", True)
+                if cid:
+                    comp_path = f"completion_{cid}.jpg"
+                    ok = download_image(get_image_url(message["image"]["id"]), comp_path)
+                    if not ok:
+                        # Put them back and let them retry
+                        pending_completion_photo[sender] = data
+                        send_message(sender, "⚠️ Could not download your photo. Please try sending it again."); return "OK", 200
+                    send_message(sender, "📸 Photo received. Running verification...")
+                    # Compare with original report photo
+                    report_path = f"report_{cid}.jpg"
+                    import os as _os
+                    if _os.path.exists(report_path):
+                        photo_result = compare_photos_with_gemini(report_path, comp_path)
+                    else:
+                        # Report photo not found (e.g. after restart) — proceed with UNCERTAIN
+                        photo_result = "UNCERTAIN"
+                        print(f"Report photo missing for {cid} — skipping comparison")
+                    finalize_case_closure(sender, cid, note, was_acc, photo_result)
+                return "OK", 200
+
+            # ── EXTRA PHOTO from volunteer already in pending_outcome (pre-COMPLETED) ──
             if sender in vols and sender in pending_outcome:
-                od = pending_outcome.get(sender, {}); cid = od.get("case_id") if isinstance(od,dict) else None
+                od  = pending_outcome.get(sender, {}); cid = od.get("case_id") if isinstance(od,dict) else None
                 if cid:
                     path = f"completion_{cid}.jpg"
                     download_image(get_image_url(message["image"]["id"]), path)
                     case = load_case(cid)
                     if case:
-                        upload_and_send_photo(case["reporter"], path, "📸 Photo from volunteer after rescue")
-                        case["completion_photo"] = True; save_case(case)
-                        send_message(sender, "✅ Photo shared with the reporter.")
+                        upload_and_send_photo(case["reporter"], path, "📸 Progress photo from your volunteer")
+                        send_message(sender, "✅ Photo shared with the reporter as a progress update.")
                     return "OK", 200
             if sender in vols and session.get("stage") != "photo": return "OK", 200
             if session.get("stage") == "location":
@@ -1164,6 +1710,15 @@ def webhook():
             urgency = extract_urgency(gemini_analysis)
             case_id = create_case(sender, session, urgency)
             if not case_id: return "OK", 200  # P6: already has active case
+
+            # Save report photo with case-specific filename for later comparison
+            import shutil
+            report_path = f"report_{case_id}.jpg"
+            try:
+                shutil.copy("received.jpg", report_path)
+                print(f"Report photo saved: {report_path}")
+            except Exception as e:
+                print(f"Report photo copy error: {e}")
             send_message(sender, f"📋 Your Case ID: {case_id}\n\nSave this — check status anytime:\nSTATUS {case_id}")
             if urgency == "HIGH":
                 send_message(sender, "🚨 HIGH URGENCY case created.\n\nDispatched to rescue team immediately.\nPlease stay with the animal if safe to do so.")
