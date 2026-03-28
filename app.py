@@ -342,11 +342,17 @@ def get_image_url(image_id):
 
 
 def download_image(image_url, save_path="received.jpg"):
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-    r = requests.get(image_url, headers=headers)
-    with open(save_path, "wb") as f:
-        f.write(r.content)
-    print(f"Image saved: {save_path}")
+    try:
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+        r = requests.get(image_url, headers=headers, timeout=15)
+        r.raise_for_status()
+        with open(save_path, "wb") as f:
+            f.write(r.content)
+        print(f"Image saved: {save_path}")
+        return True
+    except Exception as e:
+        print(f"Image download error: {e}")
+        return False
 
 
 def upload_and_send_photo(to, photo_path, caption=""):
@@ -755,17 +761,21 @@ def handle_completed(sender, text):
 # ════════════════════════════════════════════════════════════
 
 def analyze_with_gemini(image_path, user_answers):
-    img    = PIL.Image.open(image_path)
-    prompt = (
-        "You are an animal rescue triage assistant.\n\n"
-        f"Reporter info:\n{user_answers}\n\n"
-        "From the image:\n"
-        "1. Animal seen?\n2. Matches description?\n3. Severity 1-10?\n"
-        "4. Signs of distress?\n5. Urgency: HIGH / MEDIUM / LOW?\n\nBe concise."
-    )
-    response = gemini_model.generate_content([prompt, img])
-    print("GEMINI:", response.text[:120])
-    return response.text
+    try:
+        img    = PIL.Image.open(image_path)
+        prompt = (
+            "You are an animal rescue triage assistant.\n\n"
+            f"Reporter info:\n{user_answers}\n\n"
+            "From the image:\n"
+            "1. Animal seen?\n2. Matches description?\n3. Severity 1-10?\n"
+            "4. Signs of distress?\n5. Urgency: HIGH / MEDIUM / LOW?\n\nBe concise."
+        )
+        response = gemini_model.generate_content([prompt, img])
+        print("GEMINI:", response.text[:120])
+        return response.text
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return "AI analysis unavailable. Urgency: HIGH"  # fail safe to HIGH
 
 
 def extract_urgency(text):
@@ -1111,7 +1121,10 @@ def webhook():
                 return "OK", 200
 
             send_message(sender, "📸 Photo received. Sending to rescue team...")
-            download_image(get_image_url(message["image"]["id"]))
+            ok = download_image(get_image_url(message["image"]["id"]))
+            if not ok:
+                send_message(sender, "⚠️ Could not download your photo. Please try sending it again.")
+                return "OK", 200
 
             user_answers = (
                 f"Animal: {session.get('animal','?')}\n"
