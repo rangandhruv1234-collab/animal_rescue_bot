@@ -1,7 +1,9 @@
 flask
+flask-cors
 requests
-pillow
 google-generativeai
 groq
 python-dotenv
+pillow
+psycopg2-binary
 gunicorn
