@@ -445,7 +445,7 @@ def is_rate_limited(phone):
     recent = [t for t in timestamps if (now - t).total_seconds() < 60]
     recent.append(now)
     message_timestamps[phone] = recent
-    if len(recent) > 30:
+    if len(recent) > 10:
         print(f"Rate limited: {phone}")
         return True
     return False
@@ -1323,13 +1323,36 @@ def compare_photos_with_gemini(report_path, completion_path):
 def delete_case_photos(case_id):
     """Delete report and completion photos after case closes. Privacy compliance."""
     import os
-    for path in [f"report_{case_id}.jpg", f"completion_{case_id}.jpg"]:
+    for path in [f"report_{case_id}.jpg", f"completion_{case_id}.jpg", "received.jpg"]:
         try:
             if os.path.exists(path):
                 os.remove(path)
                 print(f"Deleted: {path}")
         except Exception as e:
             print(f"Photo delete error {path}: {e}")
+
+def cleanup_old_photos():
+    """
+    Startup cleanup — delete any leftover photos from previous sessions.
+    Runs once on every Railway restart to catch photos whose deletion
+    timers died with the previous process.
+    """
+    import os, glob
+    # Delete received.jpg if it exists
+    if os.path.exists("received.jpg"):
+        try: os.remove("received.jpg"); print("Deleted stale received.jpg")
+        except: pass
+    # Delete any report_ or completion_ photos older than 3 hours
+    now = datetime.now().timestamp()
+    for pattern in ["report_*.jpg", "completion_*.jpg"]:
+        for path in glob.glob(pattern):
+            try:
+                age_hours = (now - os.path.getmtime(path)) / 3600
+                if age_hours > 3:
+                    os.remove(path)
+                    print(f"Deleted stale photo: {path}")
+            except Exception as e:
+                print(f"Stale photo cleanup error {path}: {e}")
 
 def extract_urgency(text):
     t = text.upper()
@@ -1620,7 +1643,7 @@ def webhook():
                     "pending":  "⏳ Your application is under review.\n\nWe will contact you for a verification call.\nThis usually takes 1-3 days.\n\nQuestions? contact.animitr@gmail.com",
                     "rejected": "Your volunteer application was not approved.\n\nContact: contact.animitr@gmail.com",
                     "inactive": "Your volunteer account is inactive.\n\nContact: contact.animitr@gmail.com to reactivate.",
-                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page\n\nText VSTATUS after applying to check your status.",
+                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.netlify.app → Volunteer page\n\nText VSTATUS after applying to check your status.",
                 }
                 send_message(sender, msgs.get(vstatus, msgs["not_found"])); return "OK", 200
 
@@ -1672,7 +1695,7 @@ def webhook():
             if text_up == "RESPONDING":
                 vols = load_volunteers()
                 if sender not in vols:
-                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page"); return "OK", 200
+                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.netlify.app → Volunteer page"); return "OK", 200
                 cd = active_cases.get(sender)
                 if not cd:
                     # P17 FIX: DB fallback after restart
@@ -1689,7 +1712,7 @@ def webhook():
                 send_message(sender,
                     "🐾 Thank you for your interest in volunteering!\n\n"
                     "Volunteer registration is done through our website.\n\n"
-                    "Visit: animitr.org → Volunteer page\n\n"
+                    "Visit: animitr.netlify.app → Volunteer page\n\n"
                     "Fill in the form. We will contact you for a verification call before approving you.\n\n"
                     "Text VSTATUS anytime to check your application status."
                 ); return "OK", 200
@@ -1771,11 +1794,12 @@ def webhook():
             if not case_id: return "OK", 200  # P6: already has active case
 
             # Save report photo with case-specific filename for later comparison
-            import shutil
+            import shutil, os as _os2
             report_path = f"report_{case_id}.jpg"
             try:
                 shutil.copy("received.jpg", report_path)
-                print(f"Report photo saved: {report_path}")
+                _os2.remove("received.jpg")  # Delete generic copy immediately
+                print(f"Report photo saved: {report_path}, received.jpg deleted")
             except Exception as e:
                 print(f"Report photo copy error: {e}")
             send_message(sender, f"📋 Your Case ID: {case_id}\n\nSave this — check status anytime:\nSTATUS {case_id}")
@@ -1788,6 +1812,9 @@ def webhook():
             session["stage"] = "waiting"; save_session(sender, session)
             send_first_aid(sender, session)
             alert_volunteers(sender, session, urgency, gemini_analysis, case_id)
+            # Schedule photo deletion after 24 hours even if case never completes
+            # (covers abandoned cases where no volunteer ever responds)
+            threading.Timer(86400, delete_case_photos, args=[case_id]).start()
 
     except Exception as e:
         print("Webhook error:", e)
@@ -2001,5 +2028,6 @@ def seed_ngos():
 if __name__ == "__main__":
     init_db()
     seed_ngos()
+    cleanup_old_photos()
     schedule_session_cleanup()
     app.run(port=5000, debug=False)
