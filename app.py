@@ -445,7 +445,7 @@ def is_rate_limited(phone):
     recent = [t for t in timestamps if (now - t).total_seconds() < 60]
     recent.append(now)
     message_timestamps[phone] = recent
-    if len(recent) > 10:
+    if len(recent) > 30:
         print(f"Rate limited: {phone}")
         return True
     return False
