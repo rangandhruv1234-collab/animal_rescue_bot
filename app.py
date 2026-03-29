@@ -128,6 +128,42 @@ def init_db():
             session_data TEXT DEFAULT '{}',
             updated_at   TIMESTAMP DEFAULT NOW()
         );""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ngo_applications (
+            id           SERIAL PRIMARY KEY,
+            name         TEXT NOT NULL,
+            city         TEXT,
+            phone        TEXT,
+            email        TEXT UNIQUE,
+            website      TEXT,
+            work_type    TEXT,
+            description  TEXT,
+            applied_at   TIMESTAMP DEFAULT NOW(),
+            status       TEXT DEFAULT 'pending'
+        );""")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ngos (
+            id           SERIAL PRIMARY KEY,
+            name         TEXT NOT NULL,
+            city         TEXT,
+            city_key     TEXT,
+            phone        TEXT,
+            email        TEXT,
+            website      TEXT,
+            work_type    TEXT,
+            description  TEXT,
+            tags         TEXT DEFAULT '[]',
+            stat1_val    TEXT,
+            stat1_label  TEXT,
+            stat2_val    TEXT,
+            stat2_label  TEXT,
+            emoji        TEXT DEFAULT '🐾',
+            color_theme  TEXT DEFAULT 'ct-teal',
+            approved_at  TIMESTAMP DEFAULT NOW(),
+            visible      BOOLEAN DEFAULT TRUE
+        );""")
+
     conn.commit(); cur.close(); conn.close()
     print("DB initialised.")
     cleanup_stale_sessions()
@@ -1383,7 +1419,29 @@ def handle_admin_command(text):
         unblock_number(target)
         return f"🔓 Unblocked: +{target}"
 
-    elif cmd == "CLOSE_CASE" and target:
+    elif cmd == "APPROVE_NGO" and target:
+        # target is the NGO's email
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT * FROM ngo_applications WHERE LOWER(email)=%s;", (target.lower(),))
+        app_row = cur.fetchone(); cur.close(); conn.close()
+        if not app_row: return f"No NGO application found for {target}"
+        city_key = (app_row["city"] or "").lower().replace(" ","")
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO ngos (name,city,city_key,phone,email,website,work_type,description,visible)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+            ON CONFLICT (email) DO UPDATE SET visible=TRUE;
+        """, (app_row["name"], app_row["city"], city_key, app_row["phone"],
+              app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
+        cur.execute("UPDATE ngo_applications SET status='approved' WHERE LOWER(email)=%s;", (target.lower(),))
+        conn.commit(); cur.close(); conn.close()
+        return f"✅ NGO approved and now visible on website: {app_row['name']}"
+
+    elif cmd == "REJECT_NGO" and target:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE ngo_applications SET status='rejected' WHERE LOWER(email)=%s;", (target.lower(),))
+        conn.commit(); cur.close(); conn.close()
+        return f"❌ NGO application rejected: {target}"
         case = load_case(target)
         if not case: return f"Case {target} not found"
         case["status"] = "COMPLETED"; case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -1414,7 +1472,8 @@ def handle_admin_command(text):
 
     else:
         return ("Admin commands:\nAPPROVE 91XXXXXXXXXX\nREJECT 91XXXXXXXXXX\nREMOVE_VOL 91XXXXXXXXXX\n"
-                "BLOCK 91XXXXXXXXXX reason\nUNBLOCK 91XXXXXXXXXX\nCLOSE_CASE CASE-XXXX\nADMIN_STATS\nADMIN_CASES")
+                "BLOCK 91XXXXXXXXXX reason\nUNBLOCK 91XXXXXXXXXX\nCLOSE_CASE CASE-XXXX\n"
+                "APPROVE_NGO email@ngo.com\nREJECT_NGO email@ngo.com\nADMIN_STATS\nADMIN_CASES")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1549,7 +1608,7 @@ def webhook():
 
             # Admin commands
             if sender == ADMIN_NUMBER:
-                admin_cmds = ["APPROVE","REJECT","REMOVE_VOL","BLOCK","UNBLOCK","CLOSE_CASE","ADMIN_STATS","ADMIN_CASES"]
+                admin_cmds = ["APPROVE","REJECT","REMOVE_VOL","BLOCK","UNBLOCK","CLOSE_CASE","ADMIN_STATS","ADMIN_CASES","APPROVE_NGO","REJECT_NGO"]
                 if any(text_up.startswith(cmd) for cmd in admin_cmds):
                     send_message(sender, handle_admin_command(text)); return "OK", 200
 
@@ -1832,11 +1891,115 @@ def api_register_volunteer():
         print("API /register-volunteer error:", e); return jsonify({"error":"Registration failed"}), 500
 
 
+@app.route("/api/check-volunteer", methods=["GET"])
+def api_check_volunteer():
+    phone = request.args.get("phone","").strip().replace("+","").replace(" ","").replace("-","")
+    if not phone: return jsonify({"status":"not_found"})
+    return jsonify({"status": get_volunteer_status(phone)})
+
+
+@app.route("/api/check-ngo", methods=["GET"])
+def api_check_ngo():
+    email = request.args.get("email","").strip().lower()
+    if not email: return jsonify({"status":"not_found"})
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT status FROM ngo_applications WHERE LOWER(email)=%s;", (email,))
+        row = cur.fetchone()
+        if not row:
+            cur.execute("SELECT 1 FROM ngos WHERE LOWER(email)=%s AND visible=TRUE;", (email,))
+            row2 = cur.fetchone()
+            cur.close(); conn.close()
+            return jsonify({"status":"approved" if row2 else "not_found"})
+        cur.close(); conn.close()
+        return jsonify({"status": row["status"]})
+    except Exception as e:
+        print("check-ngo error:", e); return jsonify({"status":"not_found"})
+
+
+@app.route("/api/register-ngo", methods=["POST"])
+def api_register_ngo():
+    try:
+        data = request.get_json()
+        name        = data.get("name","").strip()
+        city        = data.get("city","").strip()
+        phone       = data.get("phone","").strip().replace("+","").replace(" ","")
+        email       = data.get("email","").strip().lower()
+        website     = data.get("website","").strip()
+        work_type   = data.get("work_type","").strip()
+        description = data.get("description","").strip()
+        if not name or not email:
+            return jsonify({"error":"Name and email required"}), 400
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT status FROM ngo_applications WHERE LOWER(email)=%s;", (email,))
+        existing = cur.fetchone(); cur.close(); conn.close()
+        if existing:
+            msg = "This NGO is already listed." if existing["status"]=="approved" else "An application for this email is already under review."
+            return jsonify({"error": msg}), 400
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO ngo_applications (name,city,phone,email,website,work_type,description) VALUES (%s,%s,%s,%s,%s,%s,%s);",
+                    (name, city, phone, email, website, work_type, description))
+        conn.commit(); cur.close(); conn.close()
+        if ADMIN_NUMBER:
+            send_message(ADMIN_NUMBER,
+                f"🏢 NEW NGO APPLICATION\n\nName: {name}\nCity: {city}\nEmail: {email}\n"
+                f"Website: {website or 'Not provided'}\nWork: {work_type}\n\n"
+                f"After KYC:\nAPPROVE_NGO {email}\nREJECT_NGO {email}"
+            )
+        return jsonify({"success": True})
+    except Exception as e:
+        print("register-ngo error:", e); return jsonify({"error":"Registration failed"}), 500
+
+
+@app.route("/api/ngos", methods=["GET"])
+def api_ngos():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT name,city,city_key,website,description,tags,stat1_val,stat1_label,stat2_val,stat2_label,emoji,color_theme,work_type FROM ngos WHERE visible=TRUE ORDER BY approved_at ASC;")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        ngos = []
+        for r in rows:
+            d = dict(r)
+            try: d["tags"] = json.loads(d.get("tags") or "[]")
+            except: d["tags"] = []
+            ngos.append(d)
+        return jsonify({"ngos": ngos})
+    except Exception as e:
+        print("api-ngos error:", e); return jsonify({"error":"Could not fetch NGOs"}), 500
+
+
+def seed_ngos():
+    """Seed the 9 original NGOs into DB on first run."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS cnt FROM ngos;")
+        if cur.fetchone()["cnt"] > 0:
+            cur.close(); conn.close(); return
+        ngos = [
+            ("SPCA India","Delhi","delhi","https://spcaindia.org","Society for Prevention of Cruelty to Animals. India's oldest animal welfare organisation. Runs shelters, mobile vet units, and rescue operations since 1861.",'["Rescue","Shelter","Vet Care"]',"160+","Years active","Pan India","Reach","🏥","ct-green"),
+            ("People For Animals","Pan India","pan","https://peopleforanimalsindia.org","Founded by Maneka Gandhi. India's largest animal welfare organisation with chapters in 26 states. Ambulances, hospitals, and rehabilitation centres nationwide.",'["Ambulance","Hospital","Rehab"]',"26","States","1992","Founded","🐕","ct-orange"),
+            ("FIAPO","Pan India","pan","https://fiapo.org","Federation of Indian Animal Protection Organisations. An umbrella body connecting 100+ animal welfare organisations. Advocacy, capacity building, and policy work.",'["Advocacy","Policy","Network"]',"100+","Member orgs","2007","Founded","🐄","ct-blue"),
+            ("Friendicoes SECA","Delhi","delhi","https://friendicoes.org","One of Delhi's oldest and most active shelters. Rescues, treats, and rehomes stray dogs and cats. Runs a 24/7 rescue ambulance service across Delhi-NCR.",'["Shelter","24/7 Rescue","Adoption"]',"24/7","Ambulance","1979","Founded","🐾","ct-teal"),
+            ("Welfare of Stray Dogs","Mumbai","mumbai","https://wsd.ngo","Mumbai-based organisation focused entirely on stray dog welfare. City-wide ABC programs, rescue, treatment, and vaccination drives. Founded 1999.",'["ABC Program","Vaccination","Treatment"]',"25yr+","Operating","Mumbai","Focus","🐕","ct-purple"),
+            ("Blue Cross of India","Chennai","chennai","https://bluecrossofindia.org","South India's most established animal welfare organisation. Full veterinary hospital, ambulance service, adoption programs, and school education initiatives. Est. 1959.",'["Vet Hospital","Education","Adoption"]',"65yr+","Operating","Chennai","Base","🏥","ct-red"),
+            ("Humane Society India","Pan India","pan","https://hsi.org/world/india","Indian affiliate of Humane Society International. Street animal welfare, disaster response, and policy campaigns at the national level.",'["Disaster Response","Policy","Welfare"]',"Int\'l","Affiliate","Policy","Focus","🐾","ct-blue"),
+            ("Karuna Society","Hyderabad","hyderabad","https://karunasociety.org","Rural animal welfare in AP. Mobile vet clinics, sterilisation camps, and rescue operations in areas urban NGOs don\'t reach. Est. 1994.",'["Rural Rescue","Mobile Vet","Sterilisation"]',"Rural","Focus","1994","Founded","🐄","ct-green"),
+            ("Wildlife SOS","Delhi","delhi","https://wildlifesos.org","Dedicated to protecting India\'s wildlife. Rescue elephants, bears, leopards, and other wild animals from exploitation. Over 5,000 wild rescues.",'["Wildlife","Sanctuary","Policy"]',"5,000+","Wild rescues","1995","Founded","🦁","ct-teal"),
+        ]
+        for n in ngos:
+            cur.execute("INSERT INTO ngos (name,city,city_key,website,description,tags,stat1_val,stat1_label,stat2_val,stat2_label,emoji,color_theme,visible) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE);", n)
+        conn.commit(); cur.close(); conn.close()
+        print(f"Seeded {len(ngos)} NGOs.")
+    except Exception as e:
+        print(f"NGO seed error: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════
 # STARTUP
 # ══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     init_db()
+    seed_ngos()
     schedule_session_cleanup()
     app.run(port=5000, debug=False)
