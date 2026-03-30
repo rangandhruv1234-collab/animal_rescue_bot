@@ -1643,7 +1643,7 @@ def webhook():
                     "pending":  "⏳ Your application is under review.\n\nWe will contact you for a verification call.\nThis usually takes 1-3 days.\n\nQuestions? contact.animitr@gmail.com",
                     "rejected": "Your volunteer application was not approved.\n\nContact: contact.animitr@gmail.com",
                     "inactive": "Your volunteer account is inactive.\n\nContact: contact.animitr@gmail.com to reactivate.",
-                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\n → Volunteer page\n\nText VSTATUS after applying to check your status.",
+                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page\n\nText VSTATUS after applying to check your status.",
                 }
                 send_message(sender, msgs.get(vstatus, msgs["not_found"])); return "OK", 200
 
