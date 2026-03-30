@@ -6,9 +6,9 @@ FIXES IN THIS VERSION:
   P1  — Volunteer registration now requires admin approval (website → pending → APPROVE)
   P3  — COMPLETED only works for assigned volunteer (auth check)
   P4  — increment_rescues only fires if case was ACCEPTED before COMPLETED
-  P5  — Ghost volunteer timeout: 45min HIGH, 90min others → re-escalate
+  P5  — Ghost volunteer timeout: 10min HIGH, 25min MEDIUM/LOW + 2min grace + STILL_ON_SCENE
   P6  — Max 1 active case per reporter at a time
-  P7  — Rate limiting: 10 messages per minute per number
+  P7  — Rate limiting: 30 messages per minute per number
   P9  — Location validation now uses Groq to detect nonsense addresses
   P15 — Escalation timers recovered from DB on restart
   P17 — active_cases recovered from DB on restart (RESPONDING fallback)
@@ -445,7 +445,7 @@ def is_rate_limited(phone):
     recent = [t for t in timestamps if (now - t).total_seconds() < 60]
     recent.append(now)
     message_timestamps[phone] = recent
-    if len(recent) > 10:
+    if len(recent) > 30:
         print(f"Rate limited: {phone}")
         return True
     return False
@@ -570,7 +570,10 @@ def escalate_case(case_id):
                 f"🚨 ESCALATION ALERT 🚨\nNo volunteer responded in 10 minutes!\n\n"
                 f"Case ID: {case_id}\nAnimal: {case['animal']}\n"
                 f"Severity: {case['severity']}/10\n📍 {case['location']}\n\n"
-                f"Reporter: +{case['reporter']}\n\nReply RESPONDING immediately.\nWhen done: COMPLETED {case_id}"
+                f"Reporter: +{case['reporter']}\n\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"To ACCEPT, copy and send:\nRESPONDING {case_id}\n\n"
+                f"When DONE, copy and send:\nCOMPLETED {case_id}"
             )
             active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
             alerted.append(vol)
@@ -677,7 +680,9 @@ def reopen_stale_case(case_id):
             f"Previous volunteer did not respond in time.\n\n"
             f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
             f"📍 {case['location']}\n\n"
-            f"Reply RESPONDING if you can help now.\nWhen done: COMPLETED {case_id}"
+            f"━━━━━━━━━━━━━━━\n"
+            f"To ACCEPT, copy and send:\nRESPONDING {case_id}\n\n"
+            f"When DONE, copy and send:\nCOMPLETED {case_id}"
         )
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
 
@@ -1160,22 +1165,6 @@ def handle_reporter_confirmation_deadline(reporter, case_id, vol_phone, was_acce
                 "Case remains closed. Rescue count stands. Manual review if needed."
             )
         clear_reporter_session(reporter)
-    cd = pending_volunteer_responses.get(volunteer_number, {})
-    case_id_found = cd.get("case_id") if isinstance(cd, dict) else None
-    if not case_id_found:
-        for cid, c in load_cases().items():
-            if c["reporter"] == reporter and c["status"] in ["PENDING","ACCEPTED"]:
-                case_id_found = cid; break
-    if case_id_found:
-        case = load_case(case_id_found)
-        if case:
-            case.update({"status":"ACCEPTED","volunteer":volunteer_name,"volunteer_number":volunteer_number,
-                         "time_accepted":datetime.now().strftime("%d %b %Y, %I:%M %p")})
-            save_case(case)
-    send_message(reporter, f"🙏 Thank you for staying.\n\nVolunteer {volunteer_name} is on the way.\nContact: +{volunteer_number}")
-    send_message(volunteer_number, f"✅ Reporter is waiting.\n📋 {case_id_found}\nReporter: +{reporter}\n\nWhen done: COMPLETED {case_id_found}")
-    clear_reporter_session(reporter)
-    active_cases.pop(volunteer_number, None); pending_volunteer_responses.pop(volunteer_number, None)
 
 def handle_status(sender, text):
     # P11 FIX: Only reporter or assigned volunteer gets full details
@@ -1375,7 +1364,9 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
         f"Bleeding: {session.get('bleeding','?')}\nCan move: {session.get('can_move','?')}\n"
         f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
         f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}\n\n"
-        f"Reply RESPONDING to accept.\nWhen done: COMPLETED {case_id}"
+        f"━━━━━━━━━━━━━━━\n"
+        f"To ACCEPT this case, copy and send:\nRESPONDING {case_id}\n\n"
+        f"When rescue is DONE, copy and send:\nCOMPLETED {case_id}"
     )
     alerted = []
     for vol in volunteers:
@@ -1465,6 +1456,8 @@ def handle_admin_command(text):
         cur.execute("UPDATE ngo_applications SET status='rejected' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
         return f"❌ NGO application rejected: {target}"
+
+    elif cmd == "CLOSE_CASE" and target:
         case = load_case(target)
         if not case: return f"Case {target} not found"
         case["status"] = "COMPLETED"; case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -1692,19 +1685,48 @@ def webhook():
                 if not text_up.startswith("COMPLETED") and not text_up.startswith("STATUS"):
                     if handle_outcome_note(sender, text): return "OK", 200
 
-            if text_up == "RESPONDING":
+            if text_up == "RESPONDING" or text_up.startswith("RESPONDING "):
                 vols = load_volunteers()
                 if sender not in vols:
-                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\n → Volunteer page"); return "OK", 200
-                cd = active_cases.get(sender)
-                if not cd:
-                    # P17 FIX: DB fallback after restart
-                    conn = get_db(); cur = conn.cursor()
-                    cur.execute("SELECT case_id, reporter FROM cases WHERE status='PENDING' AND alerted_volunteers LIKE %s ORDER BY time_reported DESC LIMIT 1;", (f'%{sender}%',))
-                    row = cur.fetchone(); cur.close(); conn.close()
-                    if row: cd = {"reporter": row["reporter"], "case_id": row["case_id"]}; active_cases[sender] = cd
-                if cd and isinstance(cd, dict): handle_responding(sender, vols[sender]["name"], cd)
-                else: send_message(sender, "No active rescue cases found right now.\n\nYou will receive an alert when an animal needs help.")
+                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page"); return "OK", 200
+
+                # Extract case ID if provided: RESPONDING CASE-XXXX
+                parts_r = text_up.strip().split()
+                provided_case_id = parts_r[1] if len(parts_r) >= 2 else None
+
+                if provided_case_id:
+                    # Volunteer specified a case ID — use it directly
+                    case_check = load_case(provided_case_id)
+                    if not case_check:
+                        send_message(sender, f"❌ Case {provided_case_id} not found.\n\nCheck the Case ID in your rescue alert and try again."); return "OK", 200
+                    if case_check["status"] == "COMPLETED":
+                        send_message(sender, f"Case {provided_case_id} is already completed. 🐾"); return "OK", 200
+                    if case_check["status"] == "ACCEPTED" and case_check.get("volunteer_number") != sender:
+                        send_message(sender, f"Case {provided_case_id} has already been accepted by another volunteer."); return "OK", 200
+                    cd = {"reporter": case_check["reporter"], "case_id": provided_case_id}
+                    active_cases[sender] = cd
+                    handle_responding(sender, vols[sender]["name"], cd)
+                else:
+                    # No case ID provided — check if there's exactly one pending case for them
+                    cd = active_cases.get(sender)
+                    if not cd:
+                        conn = get_db(); cur = conn.cursor()
+                        cur.execute("SELECT case_id, reporter FROM cases WHERE status='PENDING' AND alerted_volunteers LIKE %s ORDER BY time_reported DESC;", (f'%{sender}%',))
+                        rows_r = cur.fetchall(); cur.close(); conn.close()
+                        if len(rows_r) == 1:
+                            # Only one pending case — accept it automatically
+                            cd = {"reporter": rows_r[0]["reporter"], "case_id": rows_r[0]["case_id"]}
+                            active_cases[sender] = cd
+                        elif len(rows_r) > 1:
+                            # Multiple pending cases — ask them to specify
+                            case_list = "\n".join([f"• RESPONDING {r['case_id']}" for r in rows_r])
+                            send_message(sender,
+                                f"⚠️ You have {len(rows_r)} active cases. Please specify which one:\n\n{case_list}\n\nCopy and send the exact line above."
+                            ); return "OK", 200
+                    if cd and isinstance(cd, dict):
+                        handle_responding(sender, vols[sender]["name"], cd)
+                    else:
+                        send_message(sender, "No active rescue cases found right now.\n\nYou will receive an alert when an animal needs help.")
                 return "OK", 200
 
             # JOIN redirected to website
