@@ -1643,7 +1643,7 @@ def webhook():
                     "pending":  "⏳ Your application is under review.\n\nWe will contact you for a verification call.\nThis usually takes 1-3 days.\n\nQuestions? contact.animitr@gmail.com",
                     "rejected": "Your volunteer application was not approved.\n\nContact: contact.animitr@gmail.com",
                     "inactive": "Your volunteer account is inactive.\n\nContact: contact.animitr@gmail.com to reactivate.",
-                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.netlify.app → Volunteer page\n\nText VSTATUS after applying to check your status.",
+                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\n → Volunteer page\n\nText VSTATUS after applying to check your status.",
                 }
                 send_message(sender, msgs.get(vstatus, msgs["not_found"])); return "OK", 200
 
@@ -1695,7 +1695,7 @@ def webhook():
             if text_up == "RESPONDING":
                 vols = load_volunteers()
                 if sender not in vols:
-                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.netlify.app → Volunteer page"); return "OK", 200
+                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\n → Volunteer page"); return "OK", 200
                 cd = active_cases.get(sender)
                 if not cd:
                     # P17 FIX: DB fallback after restart
@@ -1712,7 +1712,7 @@ def webhook():
                 send_message(sender,
                     "🐾 Thank you for your interest in volunteering!\n\n"
                     "Volunteer registration is done through our website.\n\n"
-                    "Visit: animitr.netlify.app → Volunteer page\n\n"
+                    "Visit: animitr.org → Volunteer page\n\n"
                     "Fill in the form. We will contact you for a verification call before approving you.\n\n"
                     "Text VSTATUS anytime to check your application status."
                 ); return "OK", 200
