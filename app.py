@@ -570,10 +570,11 @@ def escalate_case(case_id):
                 f"🚨 ESCALATION ALERT 🚨\nNo volunteer responded in 10 minutes!\n\n"
                 f"Case ID: {case_id}\nAnimal: {case['animal']}\n"
                 f"Severity: {case['severity']}/10\n📍 {case['location']}\n\n"
-                f"Reporter: +{case['reporter']}\n\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"To ACCEPT, copy and send:\nRESPONDING {case_id}\n\n"
-                f"When DONE, copy and send:\nCOMPLETED {case_id}"
+                f"Reporter: +{case['reporter']}"
+            )
+            send_message(vol,
+                f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
+                f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
             )
             active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
             alerted.append(vol)
@@ -679,10 +680,11 @@ def reopen_stale_case(case_id):
             f"🔄 REACTIVATED CASE — {case_id}\n\n"
             f"Previous volunteer did not respond in time.\n\n"
             f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
-            f"📍 {case['location']}\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"To ACCEPT, copy and send:\nRESPONDING {case_id}\n\n"
-            f"When DONE, copy and send:\nCOMPLETED {case_id}"
+            f"📍 {case['location']}"
+        )
+        send_message(vol,
+            f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
+            f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
         )
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
 
@@ -1363,14 +1365,17 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
         f"Animal: {session.get('animal','?')}\nSeverity: {session.get('severity','?')}/10\n"
         f"Bleeding: {session.get('bleeding','?')}\nCan move: {session.get('can_move','?')}\n"
         f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
-        f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"To ACCEPT this case, copy and send:\nRESPONDING {case_id}\n\n"
-        f"When rescue is DONE, copy and send:\nCOMPLETED {case_id}"
+        f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}"
+    )
+    commands = (
+        f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
+        f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
     )
     alerted = []
     for vol in volunteers:
-        send_message(vol, message); send_photo_to_volunteer(vol)
+        send_message(vol, message)
+        send_message(vol, commands)
+        send_photo_to_volunteer(vol)
         active_cases[vol] = {"reporter": sender, "case_id": case_id}; alerted.append(vol); print(f"Alerted: {vol}")
     case = load_case(case_id)
     if case: case["alerted_volunteers"] = alerted; save_case(case)
