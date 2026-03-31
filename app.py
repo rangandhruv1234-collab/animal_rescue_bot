@@ -765,24 +765,176 @@ def start_acceptance_timeout(case_id, volunteer_name, urgency, delay_seconds=Non
 # ══════════════════════════════════════════════════════════════════
 
 def interpret_answer(question_type, user_answer):
-    prompt = f"""You are interpreting a WhatsApp message from someone reporting an animal emergency.
-Question type: {question_type}
-User answer: "{user_answer}"
-Return ONLY one value:
-- yes_no → YES / NO / UNCLEAR
-- animal → dog / cat / cow / horse / bird / other / UNCLEAR
-- severity → number 1-10 / UNCLEAR
-- text → cleaned answer / UNCLEAR
-Rules: "haan","ji","yep" → YES | "nahi","nope" → NO | "bahut bura hai" → 8 | "minor" → 2
-Return ONLY the value. Nothing else."""
-    r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"user","content":prompt}],
-        max_tokens=20, temperature=0
-    )
-    result = r.choices[0].message.content.strip()
-    print(f"GROQ: '{user_answer}' → '{result}'")
-    return result
+    raw   = user_answer.strip()
+    raw_l = raw.lower()
+    raw_u = raw.upper()
+
+    # ══════════════════════════════════════════════════════
+    # YES / NO
+    # ══════════════════════════════════════════════════════
+    if question_type == "yes_no":
+        words = raw_l.split()
+        first = words[0] if words else ""
+
+        YES_WORDS = {
+            "yes","y","yeah","yep","yup","sure","ok","okay","fine","correct",
+            "right","absolutely","definitely","of course","ofcourse",
+            "haan","ha","han","ji","hnji","bilkul","theek","theekhai",
+            "theek hai","accha","acha","sahi","kar","krdo","karo",
+            "haa","haa ji","hn","hmm","h"
+        }
+        NO_WORDS = {
+            "no","n","nope","nah","never","not","negative","nahi","nahin",
+            "nhi","ni","nh","na","naa","bilkul nahi","bilkul nhi",
+            "nhin","nhii","nhin"
+        }
+        NOT_SURE_WORDS = {
+            # English
+            "maybe","not sure","unsure","idk","don't know","dont know",
+            "cant say","can't say","not clear","unclear","no idea",
+            "couldn't see","couldnt see","not able to see","cant see","can't see",
+            "not visible","hard to say","difficult to say","possibly","probably",
+            "might","might be","don't know","no clue","clueless",
+            # Hindi
+            "pata nahi","pata nhi","pta nhi","pta nahi","malum nahi","malum nhi",
+            "malim nahi","malim nhi","nahin pata","nahi pata","nhi pata",
+            "koi idea nahi","koi idea nhi","kuch pata nahi","kuch nhi pata",
+            "nai pata","ni pata","nahi malum","nhi malum",
+            "shayad","shayed","shayd","lagta nahi","pata ni",
+            # Punjabi / Haryanvi
+            "koi idea ni","koi idea ni hai","ni pata","nai pata","malim ni",
+            "koi idea ni hai","pta ni","ni malum","kuj pata ni","kuch pata ni",
+            # General uncertainty
+            "not examining","couldnt examine","cannot examine","cant examine",
+            "cant check","can't check","not checked","didnt check",
+            "not seen","havent seen","haven't seen","not looking",
+        }
+
+        if raw_l in YES_WORDS or first in YES_WORDS:
+            return "YES"
+        if raw_l in NO_WORDS or first in NO_WORDS:
+            return "NO"
+        if raw_l in NOT_SURE_WORDS:
+            return "NOT_SURE"
+
+        # Sentence-level check
+        if any(w in words for w in ["yes","yeah","yep","haan","ha","ji"]):
+            return "YES"
+        if any(w in words for w in ["no","nahi","nope","nah","nahin","nhi"]):
+            return "NO"
+        if any(w in words for w in ["maybe","unsure","pata","shayad","unclear",
+                                     "malum","malim","idea","possibly","probably",
+                                     "dont","don't","know","visible","seen"]):
+            return "NOT_SURE"
+
+    # ══════════════════════════════════════════════════════
+    # ANIMAL
+    # ══════════════════════════════════════════════════════
+    if question_type == "animal":
+        # Number map — only 1-5 valid
+        num_map = {"1":"dog","2":"cat","3":"cow","4":"horse","5":"other"}
+        if raw.strip() in num_map:
+            return num_map[raw.strip()]
+
+        # Direct English matches
+        animal_map = {
+            "dog":"dog","dogs":"dog","puppy":"dog","pup":"dog","stray dog":"dog",
+            "doggy":"dog","doggie":"dog","kutta":"dog","kutte":"dog","kukur":"dog",
+            "cat":"cat","cats":"cat","kitten":"cat","kitty":"cat","billi":"cat",
+            "billee":"cat","pussy":"cat","cat kitten":"cat",
+            "cow":"cow","cows":"cow","calf":"cow","bull":"cow","ox":"cow",
+            "gaay":"cow","gaye":"cow","gai":"cow","bail":"cow","bayl":"cow",
+            "horse":"horse","horses":"horse","ghoda":"horse","ghodi":"horse",
+            "pony":"horse","mare":"horse",
+            "bird":"bird","birds":"bird","sparrow":"bird","crow":"bird",
+            "pigeon":"bird","parrot":"bird","eagle":"bird","hen":"bird",
+            "chidiya":"bird","chiriya":"bird","pakshi":"bird","murgi":"bird",
+            "other":"other","others":"other","another":"other","different":"other",
+            "monkey":"other","snake":"other","rabbit":"other","goat":"other",
+            "sheep":"other","pig":"other","deer":"other","elephant":"other",
+            "bijli":"other","bandar":"other","saap":"other","bakri":"other",
+        }
+        if raw_l in animal_map:
+            return animal_map[raw_l]
+
+        # Partial match — "brown stray dog", "injured cat near road"
+        for keyword, animal in [
+            ("dog","dog"),("puppy","dog"),("pup","dog"),("kutta","dog"),
+            ("cat","cat"),("kitten","cat"),("billi","cat"),
+            ("cow","cow"),("gaay","cow"),("gaye","cow"),("calf","cow"),("bull","cow"),
+            ("horse","horse"),("ghoda","horse"),("pony","horse"),
+            ("bird","bird"),("chidiya","bird"),("parrot","bird"),("pigeon","bird"),
+        ]:
+            if keyword in raw_l:
+                return animal
+
+    # ══════════════════════════════════════════════════════
+    # SEVERITY
+    # ══════════════════════════════════════════════════════
+    if question_type == "severity":
+        # Direct digit
+        try:
+            n = int(raw.strip().replace("/10","").replace("out of 10","").strip())
+            if 1 <= n <= 10: return str(n)
+            if n > 10: return "10"   # cap at 10
+        except: pass
+
+        # Written numbers
+        written = {
+            "one":"1","two":"2","three":"3","four":"4","five":"5",
+            "six":"6","seven":"7","eight":"8","nine":"9","ten":"10",
+            "ek":"1","do":"2","teen":"3","char":"4","paanch":"5",
+            "chhe":"6","saat":"7","aath":"8","nau":"9","das":"10",
+        }
+        if raw_l in written: return written[raw_l]
+
+        # Severity words (Groq will handle complex ones, these are fast-path)
+        critical = {"critical","very bad","bahut bura","bahut buri","serious",
+                    "dying","almost dead","emergency","severe","life threatening"}
+        moderate = {"moderate","medium","okay","ok","bad","bura","theek nahi"}
+        mild     = {"mild","minor","small","thoda","thodi","light","not bad","thoda sa"}
+        if raw_l in critical: return "8"
+        if raw_l in moderate: return "5"
+        if raw_l in mild:     return "3"
+
+    # ══════════════════════════════════════════════════════
+    # GROQ FALLBACK — for complex / ambiguous answers
+    # ══════════════════════════════════════════════════════
+    type_instructions = {
+        "yes_no":   "Return ONLY: YES / NO / NOT_SURE / UNCLEAR",
+        "animal":   "Return ONLY one word: dog / cat / cow / horse / bird / other / UNCLEAR",
+        "severity": "Return ONLY a number from 1 to 10 / UNCLEAR",
+        "text":     "Return the cleaned, concise answer in English. If completely nonsensical, return UNCLEAR.",
+    }
+    prompt = f"""You are interpreting a WhatsApp message from someone reporting an injured animal in India.
+The user is answering this type of question: {question_type}
+Their message: "{user_answer}"
+
+{type_instructions.get(question_type, "Return the cleaned answer or UNCLEAR.")}
+
+Additional rules:
+- "haan","ji","yep","bilkul","theek hai","ok" → YES
+- "nahi","nope","na","nah" → NO
+- "bahut bura hai","very bad","critical" → 8 or 9
+- "thoda","minor","not that bad" → 2 or 3
+- Numbers like "9" for animal question → UNCLEAR
+- Do NOT explain. Return ONLY the value."""
+
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=20, temperature=0
+        )
+        # Normalize — uppercase, strip punctuation, take first word for yes_no/animal
+        result = r.choices[0].message.content.strip().upper().strip(".,!?\"'")
+        if question_type in ("yes_no", "animal") and " " in result:
+            result = result.split()[0]  # take first word only
+        print(f"GROQ: '{user_answer}' → '{result}'")
+        return result
+    except Exception as e:
+        print(f"Groq interpret error: {e}")
+        return "UNCLEAR"
 
 def is_valid_location(text):
     # P9 FIX: Groq validates if location is real and navigable
@@ -815,25 +967,25 @@ Reply ONLY: YES or NO"""
 
 ALL_QUESTION_MAP = {
     "animal":         ("animal",  "Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
-    "bleeding":       ("yes_no",  "Is the animal bleeding?\n\nReply YES or NO"),
-    "can_move":       ("yes_no",  "Can the animal move on its own?\n\nReply YES or NO"),
-    "wounds":         ("yes_no",  "Are there any visible wounds or injuries?\n\nReply YES or NO"),
-    "eating":         ("yes_no",  "Is the animal eating or drinking?\n\nReply YES or NO"),
+    "bleeding":       ("yes_no",  "Is the animal bleeding?\n\nReply YES / NO / NOT SURE"),
+    "can_move":       ("yes_no",  "Can the animal move on its own?\n\nReply YES / NO / NOT SURE"),
+    "wounds":         ("yes_no",  "Are there any visible wounds or injuries?\n\nReply YES / NO / NOT SURE"),
+    "eating":         ("yes_no",  "Is the animal eating or drinking?\n\nReply YES / NO / NOT SURE"),
     "duration":       ("text",    "How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
-    "behavior":       ("text",    "Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious)"),
-    "ground_support": ("yes_no",  "Is there anyone with the animal right now?\n\nYES — please share their WhatsApp number\nNO — rescuer will be dispatched urgently"),
+    "behavior":       ("text",    "Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious, not sure)"),
+    "ground_support": ("yes_no",  "Is there anyone with the animal right now?\n\nYES — please share their WhatsApp number\nNO — rescuer will be dispatched urgently\nNOT SURE — reply NOT SURE"),
 }
 
 def get_next_question(session):
     severity = session.get("severity", 0); answered = session.get("answered", [])
     base = [
         ("animal","animal","Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
-        ("bleeding","yes_no","Is the animal bleeding?\n\nReply YES or NO"),
-        ("can_move","yes_no","Can the animal move on its own?\n\nReply YES or NO"),
+        ("bleeding","yes_no","Is the animal bleeding?\n\nReply YES / NO / NOT SURE"),
+        ("can_move","yes_no","Can the animal move on its own?\n\nReply YES / NO / NOT SURE"),
     ]
     moderate = [
-        ("wounds","yes_no","Are there any visible wounds or injuries?\n\nReply YES or NO"),
-        ("eating","yes_no","Is the animal eating or drinking?\n\nReply YES or NO"),
+        ("wounds","yes_no","Are there any visible wounds or injuries?\n\nReply YES / NO / NOT SURE"),
+        ("eating","yes_no","Is the animal eating or drinking?\n\nReply YES / NO / NOT SURE"),
         ("duration","text","How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
     ]
     mild_extra = moderate + [("behavior","text","Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious)")]
@@ -1095,9 +1247,11 @@ def handle_reporter_confirmation(reporter, reply):
     was_accepted = data.get("was_accepted", True)
     photo_missing = data.get("photo_missing", False)
 
-    reply_up = reply.strip().upper()
+    reply_up = reply.strip().upper().strip(".,!?")
+    # Use word-level matching to avoid "NO" matching inside "UNKNOWN", "CANNOT" etc.
+    reply_words = set(reply_up.split())
 
-    if reply_up == "YES" or "YES" in reply_up:
+    if reply_up in ("YES","Y","HAAN","JI","HAN") or "YES" in reply_words:
         send_message(reporter,
             f"✅ Thank you for confirming.\n\n"
             f"Case {case_id} is now fully verified.\n\n"
@@ -1111,7 +1265,7 @@ def handle_reporter_confirmation(reporter, reply):
         clear_reporter_session(reporter)
         return True
 
-    elif reply_up == "NO" or "NO" in reply_up:
+    elif reply_up in ("NO","N","NAHI","NAH","NOPE") or "NO" in reply_words:
         send_message(reporter,
             f"⚠️ Thank you for letting us know.\n\n"
             "Our admin team has been alerted and will investigate immediately.\n\n"
@@ -1138,7 +1292,7 @@ def handle_reporter_confirmation(reporter, reply):
         clear_reporter_session(reporter)
         return True
 
-    elif "UNSURE" in reply_up:
+    elif "UNSURE" in reply_words or "NOT SURE" in reply_up or reply_up in ("UNSURE","IDK","NOT SURE","MAYBE","CANT SAY"):
         send_message(reporter,
             f"Understood. We have logged your uncertainty for case {case_id}.\n\n"
             "Our team will review the case. Thank you for responding."
@@ -1533,15 +1687,39 @@ def process_answer(sender, text):
         pending_key = session.get("pending_key"); pending_qtype = session.get("pending_qtype","text")
         if pending_key:
             interpreted = interpret_answer(pending_qtype, text)
+
+            # NOT_SURE — user genuinely doesn't know. Accept and move on.
+            if interpreted in ("NOT_SURE", "NOT_SURE") and pending_qtype == "yes_no":
+                session[pending_key] = "Not sure"
+                session["pending_key"] = None; session["unclear_count"] = 0
+                save_session(sender, session)
+                send_message(sender, "Understood — noted as 'not sure'. Moving on.")
+                advance_to_next(sender, session)
+                return
+
+            # UNCLEAR on yes_no — also treat as not sure and move on
+            # (if they can't express it clearly, they don't know)
+            if interpreted == "UNCLEAR" and pending_qtype == "yes_no":
+                session[pending_key] = "Not sure"
+                session["pending_key"] = None; session["unclear_count"] = 0
+                save_session(sender, session)
+                send_message(sender, "Understood — noted as 'not sure'. Moving on.")
+                advance_to_next(sender, session)
+                return
+
             if interpreted == "UNCLEAR":
+                # For non-yes_no questions (animal, text, severity) — re-ask once
                 unclear = session.get("unclear_count",0) + 1; session["unclear_count"] = unclear
-                if unclear >= 3 and session.get("severity",5) >= 4:
+                if unclear >= 2:
                     session[pending_key] = "Not provided"; session["pending_key"] = None; session["unclear_count"] = 0
                     save_session(sender, session); advance_to_next(sender, session)
                 else:
                     save_session(sender, session)
                     _, q = ALL_QUESTION_MAP.get(pending_key, ("text","Could you clarify?"))
-                    send_message(sender, f"Sorry, I didn't understand that.\n\nCould you clarify?\n\n{q}")
+                    send_message(sender,
+                        f"Sorry, I didn't understand that.\n\n"
+                        f"Please reply YES, NO, or NOT SURE.\n\n{q}"
+                    )
                 return
             session["unclear_count"] = 0
             if pending_key == "animal":
