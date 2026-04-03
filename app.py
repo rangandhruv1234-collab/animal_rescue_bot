@@ -572,10 +572,8 @@ def escalate_case(case_id):
                 f"Severity: {case['severity']}/10\n📍 {case['location']}\n\n"
                 f"Reporter: +{case['reporter']}"
             )
-            send_message(vol,
-                f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
-                f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
-            )
+            send_message(vol, f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}")
+            send_message(vol, f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}")
             active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
             alerted.append(vol)
         case["alerted_volunteers"] = alerted; save_case(case)
@@ -682,10 +680,8 @@ def reopen_stale_case(case_id):
             f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
             f"📍 {case['location']}"
         )
-        send_message(vol,
-            f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
-            f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
-        )
+        send_message(vol, f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}")
+        send_message(vol, f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}")
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
 
     # Fresh escalation timer for the reopened case
@@ -1521,14 +1517,13 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
         f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
         f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}"
     )
-    commands = (
-        f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n"
-        f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
-    )
+    accept_command = f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}"
+    complete_command = f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
     alerted = []
     for vol in volunteers:
         send_message(vol, message)
-        send_message(vol, commands)
+        send_message(vol, accept_command)
+        send_message(vol, complete_command)
         send_photo_to_volunteer(vol, case_id)
         active_cases[vol] = {"reporter": sender, "case_id": case_id}; alerted.append(vol); print(f"Alerted: {vol}")
     case = load_case(case_id)
@@ -2242,5 +2237,6 @@ if __name__ == "__main__":
     cleanup_old_photos()
     schedule_session_cleanup()
     app.run(port=5000, debug=False)
+
 
 
