@@ -1601,11 +1601,17 @@ def handle_admin_command(text):
         city_key = (app_row["city"] or "").lower().replace(" ","")
         conn = get_db(); cur = conn.cursor()
         cur.execute("""
-            INSERT INTO ngos (name,city,city_key,phone,email,website,work_type,description,visible)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
-            ON CONFLICT (email) DO UPDATE SET visible=TRUE;
+            UPDATE ngos
+            SET name=%s, city=%s, city_key=%s, phone=%s, website=%s, work_type=%s, description=%s, visible=TRUE
+            WHERE LOWER(email)=%s;
         """, (app_row["name"], app_row["city"], city_key, app_row["phone"],
-              app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
+              app_row["website"], app_row["work_type"], app_row["description"], target.lower()))
+        if cur.rowcount == 0:
+            cur.execute("""
+                INSERT INTO ngos (name,city,city_key,phone,email,website,work_type,description,visible)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE);
+            """, (app_row["name"], app_row["city"], city_key, app_row["phone"],
+                  app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
         cur.execute("UPDATE ngo_applications SET status='approved' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
         return f"✅ NGO approved and now visible on website: {app_row['name']}"
