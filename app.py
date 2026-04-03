@@ -549,8 +549,8 @@ def upload_and_send_photo(to, photo_path, caption=""):
     requests.post(url, headers=hdrs, json=data)
     print(f"Photo sent to {to}")
 
-def send_photo_to_volunteer(to):
-    upload_and_send_photo(to, "received.jpg", "📸 Photo reported by rescue reporter")
+def send_photo_to_volunteer(to, case_id):
+    upload_and_send_photo(to, f"report_{case_id}.jpg", "📸 Photo reported by rescue reporter")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1529,7 +1529,7 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
     for vol in volunteers:
         send_message(vol, message)
         send_message(vol, commands)
-        send_photo_to_volunteer(vol)
+        send_photo_to_volunteer(vol, case_id)
         active_cases[vol] = {"reporter": sender, "case_id": case_id}; alerted.append(vol); print(f"Alerted: {vol}")
     case = load_case(case_id)
     if case: case["alerted_volunteers"] = alerted; save_case(case)
@@ -1614,7 +1614,7 @@ def handle_admin_command(text):
                   app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
         cur.execute("UPDATE ngo_applications SET status='approved' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
-        return f"✅ NGO approved: {app_row['name']}"
+        return f"✅ NGO approved and now visible on website: {app_row['name']}"
 
     elif cmd == "REJECT_NGO" and target:
         conn = get_db(); cur = conn.cursor()
@@ -2242,3 +2242,5 @@ if __name__ == "__main__":
     cleanup_old_photos()
     schedule_session_cleanup()
     app.run(port=5000, debug=False)
+
+
