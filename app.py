@@ -1614,7 +1614,7 @@ def handle_admin_command(text):
                   app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
         cur.execute("UPDATE ngo_applications SET status='approved' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
-        return f"✅ NGO approved and now visible on website: {app_row['name']}"
+        return f"✅ NGO approved: {app_row['name']}"
 
     elif cmd == "REJECT_NGO" and target:
         conn = get_db(); cur = conn.cursor()
