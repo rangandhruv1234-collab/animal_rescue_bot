@@ -1810,6 +1810,13 @@ def process_answer(sender, text):
         session["location"] = text.strip(); session["stage"] = "photo"; save_session(sender, session)
         send_message(sender, "📍 Location confirmed!\n\nNow send a clear photo of the animal.\n\nTips:\n• Get as close as safely possible\n• Make sure animal is clearly visible\n• Good lighting helps AI analysis\n\nSend photo now 📸")
 
+    elif stage == "photo":
+        send_message(sender,
+            "📸 Please send a photo only to continue.\n\n"
+            "Text is not accepted at this step.\n"
+            "Use the camera/gallery button and share the animal photo."
+        )
+
     elif stage == "waiting":
         interpreted = interpret_answer("yes_no", text)
         if text.upper() == "STAY" or interpreted == "YES":
