@@ -50,6 +50,7 @@ GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
 DATABASE_URL    = os.getenv("DATABASE_URL")
 ADMIN_NUMBER    = os.getenv("ADMIN_NUMBER", "")
+HTTP_TIMEOUT    = (5, 20)  # (connect timeout, read timeout) for external API calls
 
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.5-flash")
@@ -518,14 +519,31 @@ def send_message(to, message):
         "to": to, "type": "text",
         "text": {"preview_url": False, "body": message[:4096]},
     }
-    response = requests.post(url, headers=headers, json=data)
-    print("SEND:", response.status_code)
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=HTTP_TIMEOUT)
+        print("SEND:", response.status_code)
+    except Exception as e:
+        print(f"SEND error to {to}: {e}")
 
 def get_image_url(image_id):
     url = f"https://graph.facebook.com/v18.0/{image_id}"
-    return requests.get(url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}).json()["url"]
+    try:
+        r = requests.get(url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        payload = r.json()
+        media_url = payload.get("url")
+        if not media_url:
+            print(f"Image URL missing for {image_id}. Payload: {payload}")
+            return None
+        return media_url
+    except Exception as e:
+        print(f"get_image_url error for {image_id}: {e}")
+        return None
 
 def download_image(image_url, save_path="received.jpg"):
+    if not image_url:
+        print("Image download error: empty image_url")
+        return False
     try:
         r = requests.get(image_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}, timeout=15)
         r.raise_for_status()
@@ -538,16 +556,24 @@ def upload_and_send_photo(to, photo_path, caption=""):
     if not os.path.exists(photo_path): return
     upload_url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-    with open(photo_path, "rb") as f:
-        files = {"file": (photo_path, f, "image/jpeg"), "messaging_product": (None, "whatsapp"), "type": (None, "image/jpeg")}
-        upload_r = requests.post(upload_url, headers=headers, files=files)
-    media_id = upload_r.json().get("id")
+    try:
+        with open(photo_path, "rb") as f:
+            files = {"file": (photo_path, f, "image/jpeg"), "messaging_product": (None, "whatsapp"), "type": (None, "image/jpeg")}
+            upload_r = requests.post(upload_url, headers=headers, files=files, timeout=HTTP_TIMEOUT)
+        upload_r.raise_for_status()
+        media_id = upload_r.json().get("id")
+    except Exception as e:
+        print(f"Photo upload error for {to}: {e}")
+        return
     if not media_id: return
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     hdrs = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     data = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": "image", "image": {"id": media_id, "caption": caption}}
-    requests.post(url, headers=hdrs, json=data)
-    print(f"Photo sent to {to}")
+    try:
+        requests.post(url, headers=hdrs, json=data, timeout=HTTP_TIMEOUT)
+        print(f"Photo sent to {to}")
+    except Exception as e:
+        print(f"Photo send error to {to}: {e}")
 
 def send_photo_to_volunteer(to, case_id):
     upload_and_send_photo(to, f"report_{case_id}.jpg", "📸 Photo reported by rescue reporter")
@@ -1034,6 +1060,32 @@ def send_first_aid(sender, session):
 # ══════════════════════════════════════════════════════════════════
 # VOLUNTEER FLOW
 # ══════════════════════════════════════════════════════════════════
+
+def connect_reporter_volunteer(reporter, vol_phone, vol_name):
+    """
+    Notify volunteer when reporter confirms they are staying on site.
+    This keeps the existing STAY flow safe and removes undefined-call errors.
+    """
+    case_data = pending_volunteer_responses.pop(vol_phone, None)
+    case_id = case_data.get("case_id") if isinstance(case_data, dict) else None
+    if case_id:
+        send_message(vol_phone,
+            f"✅ Reporter is waiting at location for case {case_id}.\n"
+            f"Reporter: +{reporter}\n\n"
+            "Please coordinate directly and proceed safely."
+        )
+        send_message(reporter,
+            f"✅ Connected with volunteer {vol_name} (+{vol_phone}) for case {case_id}."
+        )
+    else:
+        send_message(vol_phone,
+            f"✅ Reporter is waiting at location.\n"
+            f"Reporter: +{reporter}\n\n"
+            "Please proceed safely."
+        )
+        send_message(reporter,
+            f"✅ Connected with volunteer {vol_name} (+{vol_phone})."
+        )
 
 def handle_responding(sender, volunteer_name, case_data):
     reporter = case_data["reporter"]; case_id_found = case_data["case_id"]
@@ -1949,7 +2001,8 @@ def webhook():
                 was_acc = data.get("was_accepted", True)
                 if cid:
                     comp_path = f"completion_{cid}.jpg"
-                    ok = download_image(get_image_url(message["image"]["id"]), comp_path)
+                    image_url = get_image_url(message["image"]["id"])
+                    ok = download_image(image_url, comp_path)
                     if not ok:
                         # Put them back and let them retry
                         pending_completion_photo[sender] = data
@@ -1972,7 +2025,8 @@ def webhook():
                 od  = pending_outcome.get(sender, {}); cid = od.get("case_id") if isinstance(od,dict) else None
                 if cid:
                     path = f"completion_{cid}.jpg"
-                    download_image(get_image_url(message["image"]["id"]), path)
+                    image_url = get_image_url(message["image"]["id"])
+                    download_image(image_url, path)
                     case = load_case(cid)
                     if case:
                         upload_and_send_photo(case["reporter"], path, "📸 Progress photo from your volunteer")
@@ -1984,7 +2038,8 @@ def webhook():
             if session.get("stage") != "photo":
                 send_message(sender, "Please answer all questions first before sending a photo."); return "OK", 200
             send_message(sender, "📸 Photo received. Analysing with AI...")
-            ok = download_image(get_image_url(message["image"]["id"]))
+            image_url = get_image_url(message["image"]["id"])
+            ok = download_image(image_url)
             if not ok:
                 send_message(sender, "⚠️ Could not download your photo.\n\nPlease try sending it again."); return "OK", 200
             user_answers = (
@@ -2017,7 +2072,12 @@ def webhook():
                 send_message(sender, "✅ Report sent to rescue team.\n\nA volunteer will check on the animal.\nThank you for reporting.")
             session["stage"] = "waiting"; save_session(sender, session)
             send_first_aid(sender, session)
-            alert_volunteers(sender, session, urgency, gemini_analysis, case_id)
+            # Run alert fan-out in background so webhook returns quickly and avoids Gunicorn timeout.
+            threading.Thread(
+                target=alert_volunteers,
+                args=[sender, dict(session), urgency, gemini_analysis, case_id],
+                daemon=True
+            ).start()
             # Schedule photo deletion after 24 hours even if case never completes
             # (covers abandoned cases where no volunteer ever responds)
             threading.Timer(86400, delete_case_photos, args=[case_id]).start()
@@ -2237,6 +2297,5 @@ if __name__ == "__main__":
     cleanup_old_photos()
     schedule_session_cleanup()
     app.run(port=5000, debug=False)
-
 
 
