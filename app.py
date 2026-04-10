@@ -52,6 +52,19 @@ DATABASE_URL    = os.getenv("DATABASE_URL")
 ADMIN_NUMBER    = os.getenv("ADMIN_NUMBER", "")
 HTTP_TIMEOUT    = (5, 20)  # (connect timeout, read timeout) for external API calls
 
+# Session TTL policy (seconds) by stage.
+# Short TTL for initial consent, longer TTL for active rescue flows.
+SESSION_TTL_DEFAULT = 2 * 60 * 60
+SESSION_TTL_BY_STAGE = {
+    "warning": 20 * 60,
+    "severity": 12 * 60 * 60,
+    "questions": 12 * 60 * 60,
+    "support_number": 12 * 60 * 60,
+    "location": 12 * 60 * 60,
+    "photo": 12 * 60 * 60,
+    "waiting": 24 * 60 * 60,
+}
+
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 groq_client  = Groq(api_key=GROQ_API_KEY)
@@ -391,11 +404,25 @@ def create_case(reporter, session, urgency):
 
 def load_session(phone):
     conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT session_data FROM sessions WHERE phone_number=%s;", (phone,))
+    cur.execute("SELECT stage, session_data, updated_at FROM sessions WHERE phone_number=%s;", (phone,))
     row = cur.fetchone(); cur.close(); conn.close()
     if not row: return {}
-    try: return json.loads(row["session_data"])
-    except: return {}
+    try:
+        data = json.loads(row["session_data"])
+    except:
+        data = {}
+
+    stage = data.get("stage") or row.get("stage") or "warning"
+    updated_at = row.get("updated_at")
+    ttl = SESSION_TTL_BY_STAGE.get(stage, SESSION_TTL_DEFAULT)
+    if updated_at:
+        now = datetime.now(updated_at.tzinfo) if getattr(updated_at, "tzinfo", None) else datetime.now()
+        if (now - updated_at).total_seconds() > ttl:
+            delete_session(phone)
+            waiting_reporters.pop(phone, None)
+            print(f"Session expired on load: {phone} stage={stage} ttl={ttl}s")
+            return {}
+    return data
 
 def save_session(phone, data):
     conn = get_db(); cur = conn.cursor()
@@ -426,14 +453,23 @@ def clear_reporter_session(sender):
 def cleanup_stale_sessions():
     try:
         conn = get_db(); cur = conn.cursor()
-        cur.execute("DELETE FROM sessions WHERE updated_at < NOW() - INTERVAL '2 hours';")
+        cur.execute("""
+            DELETE FROM sessions
+            WHERE
+                (stage = 'warning' AND updated_at < NOW() - INTERVAL '20 minutes')
+                OR (stage IN ('severity','questions','support_number','location','photo')
+                    AND updated_at < NOW() - INTERVAL '12 hours')
+                OR (stage = 'waiting' AND updated_at < NOW() - INTERVAL '24 hours')
+                OR (stage IS NULL AND updated_at < NOW() - INTERVAL '2 hours');
+        """)
         deleted = cur.rowcount; conn.commit(); cur.close(); conn.close()
         if deleted: print(f"Cleaned {deleted} stale sessions.")
     except Exception as e: print(f"Session cleanup error: {e}")
 
 def schedule_session_cleanup():
     cleanup_stale_sessions()
-    t = threading.Timer(21600, schedule_session_cleanup); t.daemon = True; t.start()
+    # Run periodic cleanup hourly. Exact expiry is also enforced during load_session().
+    t = threading.Timer(3600, schedule_session_cleanup); t.daemon = True; t.start()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -525,6 +561,18 @@ def send_message(to, message):
     except Exception as e:
         print(f"SEND error to {to}: {e}")
 
+def send_main_menu(to):
+    send_message(to,
+        "Welcome to Animitr Rescue Bot.\n\n"
+        "Available keywords:\n"
+        "• REPORT — report an injured animal\n"
+        "• STATUS CASE-[CASE-ID] — check rescue status\n"
+        "• JOIN — apply as volunteer\n"
+        "• VSTATUS — check volunteer application status\n"
+        "• HELP — show this menu again\n\n"
+        "To start a new rescue report, type: REPORT"
+    )
+
 def get_image_url(image_id):
     url = f"https://graph.facebook.com/v18.0/{image_id}"
     try:
@@ -598,8 +646,10 @@ def escalate_case(case_id):
                 f"Severity: {case['severity']}/10\n📍 {case['location']}\n\n"
                 f"Reporter: +{case['reporter']}"
             )
-            send_message(vol, f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}")
-            send_message(vol, f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}")
+            send_message(vol, "👇 COPY TO ACCEPT THIS CASE:")
+            send_message(vol, f"RESPONDING {case_id}")
+            send_message(vol, "👇 COPY WHEN RESCUE IS DONE:")
+            send_message(vol, f"COMPLETED {case_id}")
             active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
             alerted.append(vol)
         case["alerted_volunteers"] = alerted; save_case(case)
@@ -706,8 +756,10 @@ def reopen_stale_case(case_id):
             f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
             f"📍 {case['location']}"
         )
-        send_message(vol, f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}")
-        send_message(vol, f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}")
+        send_message(vol, "👇 COPY TO ACCEPT THIS CASE:")
+        send_message(vol, f"RESPONDING {case_id}")
+        send_message(vol, "👇 COPY WHEN RESCUE IS DONE:")
+        send_message(vol, f"COMPLETED {case_id}")
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
 
     # Fresh escalation timer for the reopened case
@@ -1569,12 +1621,16 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
         f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
         f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}"
     )
-    accept_command = f"👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}"
-    complete_command = f"👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
+    accept_prompt = "👇 COPY TO ACCEPT THIS CASE:"
+    accept_command = f"RESPONDING {case_id}"
+    complete_prompt = "👇 COPY WHEN RESCUE IS DONE:"
+    complete_command = f"COMPLETED {case_id}"
     alerted = []
     for vol in volunteers:
         send_message(vol, message)
+        send_message(vol, accept_prompt)
         send_message(vol, accept_command)
+        send_message(vol, complete_prompt)
         send_message(vol, complete_command)
         send_photo_to_volunteer(vol, case_id)
         active_cases[vol] = {"reporter": sender, "case_id": case_id}; alerted.append(vol); print(f"Alerted: {vol}")
@@ -1889,6 +1945,9 @@ def webhook():
             if text_up.startswith("COMPLETED"):
                 handle_completed(sender, text); return "OK", 200
 
+            if text_up in ("HELP", "MENU", "START"):
+                send_main_menu(sender); return "OK", 200
+
             # ── REPORTER CONFIRMATION (YES/NO/UNSURE after completion photo) ──
             if sender in pending_reporter_confirm:
                 if handle_reporter_confirmation(sender, text):
@@ -1982,11 +2041,23 @@ def webhook():
                     "Text VSTATUS anytime to check your application status."
                 ); return "OK", 200
 
-            if not session_exists(sender):
+            if text_up == "REPORT":
                 save_session(sender, {"stage":"warning"})
-                send_message(sender, "🚨 ANIMAL RESCUE SYSTEM 🚨\n\nYour number is registered.\nFalse reports result in legal action.\n\nGenuine emergency only. Reply YES to proceed.")
-            else:
-                process_answer(sender, text)
+                send_message(sender,
+                    "🚨 ANIMAL RESCUE SYSTEM 🚨\n\n"
+                    "Your number is registered.\n"
+                    "False reports result in legal action.\n\n"
+                    "Genuine emergency only. Reply YES to proceed."
+                )
+                return "OK", 200
+
+            # For first-time/expired sessions, do not auto-start reporting on random text.
+            session = load_session(sender)
+            if not session:
+                send_main_menu(sender)
+                return "OK", 200
+
+            process_answer(sender, text)
 
         elif message["type"] == "location":
             session = load_session(sender)
