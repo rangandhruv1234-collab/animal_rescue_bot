@@ -563,7 +563,7 @@ def send_message(to, message):
 
 def send_main_menu(to):
     send_message(to,
-        "Welcome to Animitr Rescue Bot.\n\n"
+        "Welcome to Anira.\n\n"
         "Available keywords:\n"
         "• REPORT — report an injured animal\n"
         "• STATUS CASE-[CASE-ID] — check rescue status\n"
