@@ -1,5 +1,5 @@
 """
-Anira — Telegram Animal Rescue Bot
+Animitr — Telegram Animal Rescue Bot
 Powered by Animitr Platform
 
 Same PostgreSQL DB as WhatsApp bot (app.py)
@@ -460,7 +460,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton("🚨 Report Injured Animal",   callback_data="action_report")],
         [InlineKeyboardButton("🐾 Volunteer — Join / Status", callback_data="action_volunteer")],
         [InlineKeyboardButton("📋 Check Case Status",       callback_data="action_status")],
-        [InlineKeyboardButton("ℹ️ About Anira",             callback_data="action_about")],
+        [InlineKeyboardButton("ℹ️ About Animitr",             callback_data="action_about")],
     ])
 
 def yes_no_keyboard(key):
@@ -905,8 +905,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_rate_limited(chat_id): return
 
     await send_tg(context.bot, chat_id,
-        "🐾 *Welcome to Anira*\n\n"
-        "Anira is an AI-powered animal rescue network.\n"
+        "🐾 *Welcome to Animitr*\n\n"
+        "Animitr is an AI-powered animal rescue network.\n"
         "Report injured animals. Connect with volunteers. Save lives.\n\n"
         "What would you like to do?",
         keyboard=main_menu_keyboard(),
@@ -917,7 +917,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await send_tg(context.bot, chat_id,
-        "🐾 *Anira Help*\n\n"
+        "🐾 *Animitr Help*\n\n"
         "Commands:\n"
         "/start — Main menu\n"
         "/report — Report an injured animal\n"
@@ -1351,7 +1351,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "action_volunteer":
         await send_tg(context.bot, chat_id,
-            "🐾 *Volunteer with Anira*\n\nWhat would you like to do?",
+            "🐾 *Volunteer with Animitr*\n\nWhat would you like to do?",
             keyboard=volunteer_menu_keyboard(),
             parse_mode="Markdown"
         )
@@ -1367,8 +1367,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "action_about":
         await send_tg(context.bot, chat_id,
-            "🐾 *About Anira*\n\n"
-            "Anira is part of the Animitr platform — an AI-powered animal rescue network.\n\n"
+            "🐾 *About Animitr*\n\n"
+            "Animitr is part of the Animitr platform — an AI-powered animal rescue network.\n\n"
             "• Report injured animals via WhatsApp or Telegram\n"
             "• AI photo analysis for triage\n"
             "• Volunteer dispatch system\n"
@@ -1445,7 +1445,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status, _ = get_status_for_tg_user(chat_id)
         if status == "active":
             await send_tg(context.bot, chat_id,
-                "✅ You are already an active Anira volunteer!\n\n"
+                "✅ You are already an active Animitr volunteer!\n\n"
                 "You will receive rescue alerts.\n\n"
                 "Commands:\n• RESPONDING CASE-XXXX — accept a case\n"
                 "• COMPLETED CASE-XXXX — close a case"
@@ -1469,7 +1469,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "vol_status":
         status, _ = get_status_for_tg_user(chat_id)
         msgs = {
-            "active":    "✅ You are an active Anira volunteer.\n\nYou will receive rescue alerts.",
+            "active":    "✅ You are an active Animitr volunteer.\n\nYou will receive rescue alerts.",
             "pending":   "⏳ Your application is under review.\n\nWe'll call you on WhatsApp for verification. Usually 1-3 days.",
             "rejected":  "Your application was not approved.\n\nContact: contact.animitr@gmail.com",
             "inactive":  "Your account is inactive.\n\nContact: contact.animitr@gmail.com",
@@ -1859,7 +1859,7 @@ def main():
     application.add_handler(MessageHandler(filters.LOCATION, handle_location_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Anira Telegram bot starting...")
+    logger.info("Animitr Telegram bot starting...")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True
