@@ -583,18 +583,27 @@ async def alert_all_volunteers(bot, reporter_id, session, urgency, ai_analysis, 
         # Also check if real-phone volunteer has a tg_id mapping
         if not tg_id:
             tg_id = get_tg_id_for_phone(vol_phone)
+
+        # Send Telegram alert if volunteer has TG
         if tg_id:
             try:
                 await send_tg(bot, tg_id, message, keyboard=volunteer_action_keyboard(case_id))
                 if os.path.exists(report_path):
                     await send_tg_photo(bot, tg_id, report_path, "📸 Reported animal photo")
                 tg_active_cases[tg_id] = {"reporter": str(reporter_id), "case_id": case_id}
-                alerted.append(vol_phone)
             except Exception as e:
                 logger.error(f"Failed to alert TG volunteer {tg_id}: {e}")
-        else:
-            alerted.append(vol_phone)
 
+        # Also send WhatsApp alert if volunteer has a real phone number (not tg_ format)
+        if not vol_phone.startswith("tg_"):
+            try:
+                wa_message = message + f"\n\n👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
+                send_whatsapp_message(vol_phone, wa_message)
+                logger.info(f"WA alert sent to {vol_phone}")
+            except Exception as e:
+                logger.error(f"Failed to alert WA volunteer {vol_phone}: {e}")
+
+        alerted.append(vol_phone)
     case = load_case(case_id)
     if case:
         case["alerted_volunteers"] = alerted
