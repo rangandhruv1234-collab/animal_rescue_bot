@@ -1,3 +1,4 @@
+"""
 Animitr — WhatsApp AI Animal Rescue Bot
 PostgreSQL edition — v2 with full security fixes
 
