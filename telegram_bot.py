@@ -70,6 +70,7 @@ tg_pending_photo        = {}
 tg_pending_confirm      = {}
 tg_waiting_reporters    = {}
 tg_message_timestamps   = {}
+tg_pending_admin        = {}   # chat_id → {action, phone, name} for admin confirm flows
 
 # Stages where ONLY button input is valid — text is rejected
 BUTTON_ONLY_STAGES = {
@@ -552,6 +553,173 @@ def still_on_scene_keyboard(case_id):
         [InlineKeyboardButton(f"✅ COMPLETED {case_id}", callback_data=f"done_{case_id}")],
     ])
 
+def admin_volunteer_keyboard(phone):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ APPROVE",  callback_data=f"admin_approve_{phone}"),
+         InlineKeyboardButton("❌ REJECT",   callback_data=f"admin_reject_{phone}")],
+    ])
+
+def admin_case_keyboard(case_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🔒 CLOSE CASE {case_id}", callback_data=f"admin_close_{case_id}")],
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════
+# ADMIN COMMAND HANDLER (Telegram)
+# ══════════════════════════════════════════════════════════════════
+
+async def handle_admin_tg_command(chat_id, text, bot):
+    """
+    Handle admin text commands sent by admin on Telegram.
+    Supports: REMOVE_VOL, BLOCK, UNBLOCK, CLOSE_CASE, ADMIN_STATS, ADMIN_CASES
+    APPROVE and REJECT are handled via inline buttons but also work as text.
+    """
+    parts  = text.strip().split()
+    cmd    = parts[0].upper()
+    target = parts[1] if len(parts) > 1 else None
+    reason = " ".join(parts[2:]) if len(parts) > 2 else ""
+
+    if cmd == "APPROVE" and target:
+        app = get_application(target)
+        if not app:
+            await send_tg(bot, chat_id, f"No application found for {target}")
+            return
+        save_volunteer(target, app["name"], app["city"], app["tier"])
+        update_application_status(target, "approved")
+        approval_msg = (
+            f"✅ Welcome to Animitr, {app['name']}!\n\nYour application has been approved.\n\n"
+            "You will now receive rescue alerts.\n\nCommands:\n"
+            "RESPONDING CASE-XXXX — accept a case\nCOMPLETED CASE-XXXX — close a case\n\n"
+            "After every rescue, you MUST send a completion photo. This is mandatory.\n\n"
+            "Thank you for joining. You are going to save lives. 💚"
+        )
+        # Notify on WhatsApp
+        send_whatsapp_message(target, approval_msg)
+        # Notify on Telegram if they registered via TG
+        tg_id = get_tg_id_for_phone(target)
+        if tg_id:
+            await send_tg(bot, tg_id, approval_msg)
+        await send_tg(bot, chat_id, f"✅ Approved: {app['name']} (+{target})")
+
+    elif cmd == "REJECT" and target:
+        app = get_application(target)
+        if not app:
+            await send_tg(bot, chat_id, f"No application found for {target}")
+            return
+        update_application_status(target, "rejected")
+        rejection_msg = (
+            "Thank you for applying to Animitr.\n\n"
+            "After review, we are unable to approve your application at this time.\n\n"
+            "Questions? contact.animitr@gmail.com"
+        )
+        send_whatsapp_message(target, rejection_msg)
+        tg_id = get_tg_id_for_phone(target)
+        if tg_id:
+            await send_tg(bot, tg_id, rejection_msg)
+        await send_tg(bot, chat_id, f"❌ Rejected: {app['name']} (+{target})")
+
+    elif cmd == "REMOVE_VOL" and target:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE volunteers SET status='inactive' WHERE phone_number=%s;", (target,))
+        conn.commit(); cur.close(); conn.close()
+        send_whatsapp_message(target,
+            "Your Animitr volunteer account has been deactivated.\n"
+            "Contact contact.animitr@gmail.com if you have questions."
+        )
+        await send_tg(bot, chat_id, f"🚫 Removed volunteer: +{target}")
+
+    elif cmd == "BLOCK" and target:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO blocked_numbers (phone_number,reason) VALUES (%s,%s) ON CONFLICT (phone_number) DO UPDATE SET reason=EXCLUDED.reason;", (target, reason))
+        conn.commit(); cur.close(); conn.close()
+        await send_tg(bot, chat_id, f"🔒 Blocked: +{target} — {reason or 'no reason'}")
+
+    elif cmd == "UNBLOCK" and target:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("DELETE FROM blocked_numbers WHERE phone_number=%s;", (target,))
+        conn.commit(); cur.close(); conn.close()
+        await send_tg(bot, chat_id, f"🔓 Unblocked: +{target}")
+
+    elif cmd == "CLOSE_CASE" and target:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT * FROM cases WHERE case_id=%s;", (target,))
+        case = cur.fetchone(); cur.close(); conn.close()
+        if not case:
+            await send_tg(bot, chat_id, f"Case {target} not found.")
+            return
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE cases SET status='COMPLETED', time_completed=%s, outcome=%s WHERE case_id=%s;
+        """, (datetime.now().strftime("%d %b %Y, %I:%M %p"), "Force-closed by admin", target))
+        conn.commit(); cur.close(); conn.close()
+        await send_tg(bot, chat_id, f"🔒 Force-closed: {target}")
+
+    elif cmd == "ADMIN_STATS":
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS t FROM cases;"); total = cur.fetchone()["t"]
+        cur.execute("SELECT COUNT(*) AS t FROM cases WHERE status='COMPLETED';"); done = cur.fetchone()["t"]
+        cur.execute("SELECT COUNT(*) AS t FROM cases WHERE status IN ('PENDING','ACCEPTED');"); active = cur.fetchone()["t"]
+        cur.execute("SELECT COUNT(*) AS t FROM volunteers WHERE status='active';"); vols = cur.fetchone()["t"]
+        cur.execute("SELECT COUNT(*) AS t FROM volunteer_applications WHERE status='pending';"); pending = cur.fetchone()["t"]
+        cur.close(); conn.close()
+        await send_tg(bot, chat_id,
+            f"📊 ANIMITR STATS\n\n"
+            f"Total cases: {total}\nCompleted: {done}\nActive: {active}\n"
+            f"Active volunteers: {vols}\nPending applications: {pending}\n"
+            f"Completion rate: {round(done/total*100,1) if total else 0}%"
+        )
+
+    elif cmd == "ADMIN_CASES":
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            SELECT case_id, animal, urgency, status FROM cases
+            WHERE status IN ('PENDING','ACCEPTED')
+            ORDER BY time_reported DESC LIMIT 10;
+        """)
+        rows = cur.fetchall(); cur.close(); conn.close()
+        if not rows:
+            await send_tg(bot, chat_id, "No active cases right now.")
+            return
+        lines = ["📋 ACTIVE CASES\n"]
+        for r in rows:
+            lines.append(f"{r['case_id']} | {r['animal']} | {r['urgency']} | {r['status']}")
+            await send_tg(bot, chat_id,
+                "\n".join(lines),
+                keyboard=admin_case_keyboard(r['case_id'])
+            )
+            lines = []
+
+    elif cmd == "PENDING_VOLS":
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            SELECT phone_number, name, city FROM volunteer_applications
+            WHERE status='pending' ORDER BY applied_at DESC LIMIT 10;
+        """)
+        rows = cur.fetchall(); cur.close(); conn.close()
+        if not rows:
+            await send_tg(bot, chat_id, "No pending applications right now.")
+            return
+        for r in rows:
+            await send_tg(bot, chat_id,
+                f"📝 NEW APPLICATION\n\nName: {r['name']}\nCity: {r['city']}\nPhone: +{r['phone_number']}",
+                keyboard=admin_volunteer_keyboard(r["phone_number"])
+            )
+
+    else:
+        await send_tg(bot, chat_id,
+            "📋 Admin Commands:\n\n"
+            "APPROVE 91XXXXXXXXXX\n"
+            "REJECT 91XXXXXXXXXX\n"
+            "REMOVE_VOL 91XXXXXXXXXX\n"
+            "BLOCK 91XXXXXXXXXX reason\n"
+            "UNBLOCK 91XXXXXXXXXX\n"
+            "CLOSE_CASE CASE-XXXX\n"
+            "ADMIN_STATS\n"
+            "ADMIN_CASES\n"
+            "PENDING_VOLS"
+        )
+
 
 # ══════════════════════════════════════════════════════════════════
 # SEND HELPERS
@@ -991,6 +1159,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked_tg(chat_id): return
     if is_rate_limited(chat_id): return
 
+    # ── ADMIN COMMANDS ─────────────────────────────────────────────
+    if ADMIN_TG_ID and str(chat_id) == str(ADMIN_TG_ID):
+        admin_cmds = ["APPROVE","REJECT","REMOVE_VOL","BLOCK","UNBLOCK",
+                      "CLOSE_CASE","ADMIN_STATS","ADMIN_CASES","PENDING_VOLS"]
+        if any(text_up.startswith(cmd) for cmd in admin_cmds):
+            await handle_admin_tg_command(chat_id, text, context.bot)
+            return
+
     session = tg_sessions.get(chat_id, {})
     stage   = session.get("stage","")
     flow    = session.get("flow_stage","")
@@ -1162,16 +1338,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"City: {city}\n"
             f"WhatsApp: +{wa_number}\n"
             f"Telegram ID: {chat_id}\n\n"
-            f"After KYC call:\n"
-            f"APPROVE {wa_number}\n"
-            f"REJECT {wa_number}"
+            f"After KYC call, tap below to approve or reject:"
         )
 
         if ADMIN_NUMBER:
-            send_whatsapp_message(ADMIN_NUMBER, admin_msg)
+            send_whatsapp_message(ADMIN_NUMBER,
+                f"🆕 NEW VOLUNTEER APPLICATION (Telegram)\n\n"
+                f"Name: {name}\nCity: {city}\nWhatsApp: +{wa_number}\n\n"
+                f"After KYC call:\nAPPROVE {wa_number}\nREJECT {wa_number}"
+            )
 
         if ADMIN_TG_ID:
-            await send_tg(context.bot, int(ADMIN_TG_ID), admin_msg)
+            await send_tg(context.bot, int(ADMIN_TG_ID), admin_msg,
+                keyboard=admin_volunteer_keyboard(wa_number)
+            )
 
         return
 
@@ -1621,6 +1801,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("confirm_"):
         reply = data.replace("confirm_","")
         await handle_reporter_confirm(chat_id, reply, context.bot)
+        return
+
+    # ── ADMIN CALLBACKS ────────────────────────────────────────────
+    if data.startswith("admin_approve_"):
+        phone = data.replace("admin_approve_","")
+        await handle_admin_tg_command(chat_id, f"APPROVE {phone}", context.bot)
+        return
+
+    if data.startswith("admin_reject_"):
+        phone = data.replace("admin_reject_","")
+        await handle_admin_tg_command(chat_id, f"REJECT {phone}", context.bot)
+        return
+
+    if data.startswith("admin_close_"):
+        case_id = data.replace("admin_close_","")
+        await handle_admin_tg_command(chat_id, f"CLOSE_CASE {case_id}", context.bot)
         return
 
 
