@@ -563,10 +563,35 @@ def send_telegram_message(chat_id, message):
         print(f"TG message error to {chat_id}: {e}")
 
 
-def send_telegram_confirmation_request(chat_id, case_id, vol_name):
-    """Send reporter confirmation message with YES/NO/UNSURE inline buttons."""
+def send_telegram_confirmation_request(chat_id, case_id, vol_name, vol_phone, was_accepted):
+    """Send reporter confirmation message with YES/NO/UNSURE inline buttons.
+    Also saves pending confirm state to DB so telegram_bot.py can process the callback."""
     if not TELEGRAM_TOKEN or not chat_id:
         return
+
+    # Save pending confirm to DB so telegram_bot.py can access it
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sessions (phone_number, stage, session_data, updated_at)
+            VALUES (%s, 'tg_confirm', %s, NOW())
+            ON CONFLICT (phone_number) DO UPDATE SET
+                stage='tg_confirm', session_data=EXCLUDED.session_data, updated_at=NOW();
+        """, (
+            f"tgconfirm_{chat_id}",
+            json.dumps({
+                "case_id":        case_id,
+                "volunteer_name": vol_name,
+                "vol_phone":      vol_phone,
+                "was_accepted":   was_accepted,
+                "photo_missing":  False,
+            })
+        ))
+        conn.commit(); cur.close(); conn.close()
+        print(f"TG confirm state saved for chat_id {chat_id} case {case_id}")
+    except Exception as e:
+        print(f"TG confirm save error: {e}")
+
     payload = {
         "chat_id": chat_id,
         "text": (
@@ -578,11 +603,11 @@ def send_telegram_confirmation_request(chat_id, case_id, vol_name):
         "reply_markup": {
             "inline_keyboard": [
                 [
-                    {"text": "✅ YES — Animal is safe",  "callback_data": f"confirm_YES"},
-                    {"text": "❌ NO — Something wrong",  "callback_data": f"confirm_NO"},
+                    {"text": "✅ YES — Animal is safe",  "callback_data": "confirm_YES"},
+                    {"text": "❌ NO — Something wrong",  "callback_data": "confirm_NO"},
                 ],
                 [
-                    {"text": "❓ UNSURE", "callback_data": f"confirm_UNSURE"},
+                    {"text": "❓ UNSURE", "callback_data": "confirm_UNSURE"},
                 ]
             ]
         }
@@ -1296,7 +1321,7 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
                 f"Your volunteer {vol_name} completed the rescue for case {case_id}."
             )
         # Send confirmation with inline YES/NO/UNSURE buttons
-        send_telegram_confirmation_request(reporter_tg_id, case_id, vol_name)
+        send_telegram_confirmation_request(reporter_tg_id, case_id, vol_name, vol_phone, was_accepted)
     else:
         # Reporter is on WhatsApp -- send normally
         upload_and_send_photo(reporter, completion_p,
