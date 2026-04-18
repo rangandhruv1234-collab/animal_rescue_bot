@@ -563,6 +563,41 @@ def send_telegram_message(chat_id, message):
         print(f"TG message error to {chat_id}: {e}")
 
 
+def send_telegram_confirmation_request(chat_id, case_id, vol_name):
+    """Send reporter confirmation message with YES/NO/UNSURE inline buttons."""
+    if not TELEGRAM_TOKEN or not chat_id:
+        return
+    payload = {
+        "chat_id": chat_id,
+        "text": (
+            f"🐾 Rescue update for case {case_id}:\n\n"
+            f"Volunteer {vol_name} has marked this rescue as complete "
+            "and sent the photo above.\n\n"
+            "Please confirm — does the animal look safe?"
+        ),
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ YES — Animal is safe",  "callback_data": f"confirm_YES"},
+                    {"text": "❌ NO — Something wrong",  "callback_data": f"confirm_NO"},
+                ],
+                [
+                    {"text": "❓ UNSURE", "callback_data": f"confirm_UNSURE"},
+                ]
+            ]
+        }
+    }
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json=payload,
+            timeout=(5, 15)
+        )
+        print(f"TG confirmation request sent to {chat_id}")
+    except Exception as e:
+        print(f"TG confirmation error to {chat_id}: {e}")
+
+
 def send_telegram_photo(chat_id, photo_path, caption=""):
     """Send a local photo file to a Telegram chat_id using the Bot API."""
     if not TELEGRAM_TOKEN or not chat_id or not os.path.exists(photo_path):
@@ -1260,14 +1295,8 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
             send_telegram_photo(reporter_tg_id, completion_p,
                 f"Your volunteer {vol_name} completed the rescue for case {case_id}."
             )
-        send_telegram_message(reporter_tg_id,
-            f"Rescue update for case {case_id}:\n\n"
-            f"Volunteer {vol_name} has marked this rescue as complete.\n\n"
-            "Please confirm -- does the animal look safe?\n\n"
-            "Reply YES -- animal looks safe\n"
-            "Reply NO -- something looks wrong\n"
-            "Reply UNSURE -- you cannot tell"
-        )
+        # Send confirmation with inline YES/NO/UNSURE buttons
+        send_telegram_confirmation_request(reporter_tg_id, case_id, vol_name)
     else:
         # Reporter is on WhatsApp -- send normally
         upload_and_send_photo(reporter, completion_p,
