@@ -640,6 +640,61 @@ def send_telegram_photo(chat_id, photo_path, caption=""):
         print(f"TG photo error to {chat_id}: {e}")
 
 
+# ══════════════════════════════════════════════════════════════════
+# DB-BACKED STATE (survives Railway restarts)
+# ══════════════════════════════════════════════════════════════════
+
+def save_pending_completion(phone, data):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (phone_number, stage, session_data, updated_at)
+        VALUES (%s, 'wa_completion', %s, NOW())
+        ON CONFLICT (phone_number) DO UPDATE SET
+            stage='wa_completion', session_data=EXCLUDED.session_data, updated_at=NOW();
+    """, (f"wacomp_{phone}", json.dumps(data)))
+    conn.commit(); cur.close(); conn.close()
+
+def load_pending_completion(phone):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT session_data FROM sessions WHERE phone_number=%s AND stage='wa_completion';",
+                (f"wacomp_{phone}",))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row: return None
+    try: return json.loads(row["session_data"])
+    except: return None
+
+def delete_pending_completion(phone):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE phone_number=%s AND stage='wa_completion';",
+                (f"wacomp_{phone}",))
+    conn.commit(); cur.close(); conn.close()
+
+def save_pending_outcome(phone, data):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (phone_number, stage, session_data, updated_at)
+        VALUES (%s, 'wa_outcome', %s, NOW())
+        ON CONFLICT (phone_number) DO UPDATE SET
+            stage='wa_outcome', session_data=EXCLUDED.session_data, updated_at=NOW();
+    """, (f"waout_{phone}", json.dumps(data)))
+    conn.commit(); cur.close(); conn.close()
+
+def load_pending_outcome(phone):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT session_data FROM sessions WHERE phone_number=%s AND stage='wa_outcome';",
+                (f"waout_{phone}",))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row: return None
+    try: return json.loads(row["session_data"])
+    except: return None
+
+def delete_pending_outcome(phone):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE phone_number=%s AND stage='wa_outcome';",
+                (f"waout_{phone}",))
+    conn.commit(); cur.close(); conn.close()
+
+
 def notify_volunteer_on_telegram(phone, message):
     """
     Called after APPROVE or REJECT in handle_admin_command.
@@ -828,7 +883,7 @@ def reopen_stale_case(case_id):
     save_case(case)
     if stale_num:
         active_cases.pop(stale_num, None)
-        pending_outcome.pop(stale_num, None)
+        delete_pending_outcome(stale_num)
         send_message(stale_num,
             f"Case {case_id} has been transferred to another volunteer.\n\n"
             "You did not respond within the time window.\n\n"
@@ -1217,7 +1272,7 @@ def handle_responding(sender, volunteer_name, case_data):
             "Please stay available -- we will ask you to confirm that the animal looks safe."
         )
 
-    pending_outcome[sender] = {"case_id": case_id_found, "note": None}
+    save_pending_outcome(sender, {"case_id": case_id_found, "note": None})
     active_cases.pop(sender, None); pending_volunteer_responses.pop(sender, None)
 
     def send_reminder():
@@ -1236,20 +1291,21 @@ def handle_responding(sender, volunteer_name, case_data):
     start_acceptance_timeout(case_id_found, volunteer_name, case.get("urgency","MEDIUM"))
 
 def handle_outcome_note(sender, text):
-    data = pending_outcome.get(sender)
+    data = load_pending_outcome(sender)
     if not data or not isinstance(data, dict): return False
     note = text.strip()[:500]
     if len(note) < 5:
         send_message(sender, "Please write a proper outcome note (minimum 5 characters).\nExample: Taken to Blue Cross clinic. Stable."); return True
-    data["note"] = note; pending_outcome[sender] = data
+    data["note"] = note; save_pending_outcome(sender, data)
     send_message(sender, f"Note saved.\nWhen done: COMPLETED {data['case_id']}"); return True
 
 def handle_photo_deadline(vol_phone, case_id):
-    if vol_phone not in pending_completion_photo:
+    data = load_pending_completion(vol_phone)
+    if not data:
         return
-    data = pending_completion_photo.pop(vol_phone, {})
     if data.get("case_id") != case_id:
         return
+    delete_pending_completion(vol_phone)
     print(f"Photo deadline missed: {case_id} by {vol_phone}")
     case = load_case(case_id)
     if not case or case["status"] == "COMPLETED":
@@ -1259,7 +1315,7 @@ def handle_photo_deadline(vol_phone, case_id):
     case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
     if note: case["outcome"] = note
     save_case(case)
-    pending_outcome.pop(vol_phone, None)
+    delete_pending_outcome(vol_phone)
     add_photo_warning(vol_phone)
     reporter = case["reporter"]
 
@@ -1301,7 +1357,7 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
     case["completion_photo"] = True
     if note: case["outcome"] = note
     save_case(case)
-    pending_outcome.pop(vol_phone, None)
+    delete_pending_outcome(vol_phone)
     reporter     = case["reporter"]
     vol_name     = case.get("volunteer", "Volunteer")
     completion_p = f"completion_{case_id}.jpg"
@@ -1313,17 +1369,13 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
         "You made a real difference."
     )
 
-    # FIX 3b: If reporter is Telegram user, send completion photo + confirmation to Telegram
+    # FIX 3b: If reporter is Telegram user, photo was already forwarded in webhook
+    # Just send the confirmation buttons
     reporter_tg_id = get_tg_id_for_reporter(reporter)
     if reporter_tg_id:
-        if os.path.exists(completion_p):
-            send_telegram_photo(reporter_tg_id, completion_p,
-                f"Your volunteer {vol_name} completed the rescue for case {case_id}."
-            )
-        # Send confirmation with inline YES/NO/UNSURE buttons
         send_telegram_confirmation_request(reporter_tg_id, case_id, vol_name, vol_phone, was_accepted)
     else:
-        # Reporter is on WhatsApp -- send normally
+        # Reporter is on WhatsApp -- send photo + confirmation normally
         upload_and_send_photo(reporter, completion_p,
             f"Your volunteer {vol_name} has completed the rescue for case {case_id}."
         )
@@ -1504,13 +1556,13 @@ def handle_completed(sender, text):
             except: hours_elapsed = 0
             if hours_elapsed < 3:
                 send_message(sender, "A volunteer is still assigned to your case.\nPlease wait for them to complete the rescue."); return
-    note_data = pending_outcome.get(sender, {})
+    note_data = load_pending_outcome(sender) or {}
     note      = note_data.get("note") if isinstance(note_data, dict) else None
-    pending_completion_photo[sender] = {
+    save_pending_completion(sender, {
         "case_id":     case_id,
         "note":        note,
         "was_accepted": (case["status"] == "ACCEPTED"),
-    }
+    })
     send_message(sender,
         f"Almost done -- one last step.\n\n"
         f"Please send a photo of the animal NOW to close case {case_id}.\n\n"
@@ -1688,7 +1740,7 @@ def handle_admin_command(text):
         conn = get_db(); cur = conn.cursor()
         cur.execute("UPDATE volunteers SET status='inactive' WHERE phone_number=%s;", (target,))
         conn.commit(); cur.close(); conn.close()
-        active_cases.pop(target, None); pending_outcome.pop(target, None)
+        active_cases.pop(target, None); delete_pending_outcome(target)
         send_message(target, "Your Animitr volunteer account has been deactivated.\nContact contact.animitr@gmail.com if you have questions.")
         return f"Removed volunteer: +{target}"
 
@@ -1971,7 +2023,7 @@ def webhook():
                     t.daemon = True; t.start()
                 return "OK", 200
 
-            if sender in pending_outcome:
+            if load_pending_outcome(sender):
                 if not text_up.startswith("COMPLETED") and not text_up.startswith("STATUS"):
                     if handle_outcome_note(sender, text): return "OK", 200
 
@@ -2050,17 +2102,18 @@ def webhook():
         elif message["type"] == "image":
             session = load_session(sender); vols = load_volunteers()
 
-            if sender in pending_completion_photo:
-                data    = pending_completion_photo.pop(sender, {})
-                cid     = data.get("case_id")
-                note    = data.get("note")
-                was_acc = data.get("was_accepted", True)
+            comp_data = load_pending_completion(sender)
+            if comp_data:
+                delete_pending_completion(sender)
+                cid     = comp_data.get("case_id")
+                note    = comp_data.get("note")
+                was_acc = comp_data.get("was_accepted", True)
                 if cid:
                     comp_path = f"completion_{cid}.jpg"
                     image_url = get_image_url(message["image"]["id"])
                     ok = download_image(image_url, comp_path)
                     if not ok:
-                        pending_completion_photo[sender] = data
+                        save_pending_completion(sender, comp_data)
                         send_message(sender, "Could not download your photo. Please try sending it again."); return "OK", 200
                     send_message(sender, "Photo received. Running verification...")
                     report_path = f"report_{cid}.jpg"
@@ -2070,11 +2123,23 @@ def webhook():
                     else:
                         photo_result = "UNCERTAIN"
                         print(f"Report photo missing for {cid} -- skipping comparison")
+
+                    # Forward completion photo to Telegram reporter immediately
+                    # while file still exists on disk
+                    case_for_photo = load_case(cid)
+                    if case_for_photo:
+                        reporter_for_photo = case_for_photo.get("reporter","")
+                        reporter_tg_for_photo = get_tg_id_for_reporter(reporter_for_photo)
+                        if reporter_tg_for_photo and _os.path.exists(comp_path):
+                            send_telegram_photo(reporter_tg_for_photo, comp_path,
+                                f"Your volunteer has completed the rescue for case {cid}."
+                            )
+
                     finalize_case_closure(sender, cid, note, was_acc, photo_result)
                 return "OK", 200
 
-            if sender in vols and sender in pending_outcome:
-                od  = pending_outcome.get(sender, {}); cid = od.get("case_id") if isinstance(od,dict) else None
+            if sender in vols and load_pending_outcome(sender):
+                od  = load_pending_outcome(sender) or {}; cid = od.get("case_id") if isinstance(od,dict) else None
                 if cid:
                     path = f"completion_{cid}.jpg"
                     image_url = get_image_url(message["image"]["id"])
