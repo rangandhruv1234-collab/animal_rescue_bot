@@ -2016,7 +2016,30 @@ async def handle_responding_text(chat_id, case_id_provided, bot):
 
 
 async def handle_reporter_confirm(chat_id, reply, bot):
+    # First check in-memory (TG volunteer completed case)
     data = tg_pending_confirm.get(chat_id)
+
+    # If not in memory, check DB (WA volunteer completed TG reporter's case)
+    if not data:
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute(
+                "SELECT session_data FROM sessions WHERE phone_number=%s AND stage='tg_confirm';",
+                (f"tgconfirm_{chat_id}",)
+            )
+            row = cur.fetchone(); cur.close(); conn.close()
+            if row:
+                db_data = json.loads(row["session_data"])
+                data = {
+                    "case_id":        db_data.get("case_id"),
+                    "volunteer_name": db_data.get("volunteer_name","Volunteer"),
+                    "vol_phone":      db_data.get("vol_phone",""),
+                    "was_accepted":   db_data.get("was_accepted", True),
+                    "photo_missing":  db_data.get("photo_missing", False),
+                }
+        except Exception as e:
+            logger.error(f"TG confirm DB lookup error: {e}")
+
     if not data:
         return False
 
@@ -2026,8 +2049,16 @@ async def handle_reporter_confirm(chat_id, reply, bot):
     was_accepted  = data.get("was_accepted", True)
     photo_missing = data.get("photo_missing", False)
 
-    if reply in ("YES","Y"):
+    def cleanup():
         tg_pending_confirm.pop(chat_id, None)
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("DELETE FROM sessions WHERE phone_number=%s;", (f"tgconfirm_{chat_id}",))
+            conn.commit(); cur.close(); conn.close()
+        except: pass
+
+    if reply in ("YES","Y"):
+        cleanup()
         await send_tg(bot, chat_id,
             f"✅ Thank you for confirming.\n\nCase {case_id} is now fully verified.\n\n"
             "Your report saved an animal today. 🐾",
@@ -2040,7 +2071,7 @@ async def handle_reporter_confirm(chat_id, reply, bot):
         return True
 
     elif reply in ("NO","N"):
-        tg_pending_confirm.pop(chat_id, None)
+        cleanup()
         await send_tg(bot, chat_id,
             f"⚠️ Thank you for letting us know.\n\n"
             "Our team has been alerted and will investigate.\n\n"
@@ -2063,7 +2094,7 @@ async def handle_reporter_confirm(chat_id, reply, bot):
         return True
 
     elif reply in ("UNSURE",):
-        tg_pending_confirm.pop(chat_id, None)
+        cleanup()
         await send_tg(bot, chat_id,
             f"Understood. We've logged your uncertainty for case {case_id}.\n\n"
             "Our team will review. Thank you.",
