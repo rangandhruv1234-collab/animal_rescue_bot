@@ -13,6 +13,12 @@ CHANGES V2:
   - Approval sync: already approved on one platform = blocked on other
   - Real phone stored so volunteer appears on website leaderboard
 
+FIXES V3:
+  - Fix 1: COMPLETED button shown to Telegram volunteer after accepting a case
+  - Fix 2: Reporter's Telegram photo sent to WhatsApp volunteers via WA API
+  - Fix 4: WA volunteer alert split into separate messages (not one big blob)
+  - Fix 5: New Telegram cases now notify WhatsApp admin too
+
 Author: Dhruv Rangan
 """
 
@@ -114,17 +120,11 @@ def save_application(phone, name, city=None, tier=None, tg_id=None):
     """, (phone, name, city, tier or "community"))
     conn.commit(); cur.close(); conn.close()
 
-    # Store tg_id → phone mapping so APPROVE in app.py can notify via Telegram
     if tg_id:
         save_tg_mapping(phone, tg_id)
 
 
 def save_tg_mapping(phone, tg_id):
-    """
-    Store phone → tg_id mapping using sessions table.
-    This lets app.py's APPROVE command find the TG chat_id
-    and send a Telegram notification when approving.
-    """
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         INSERT INTO sessions (phone_number, stage, session_data, updated_at)
@@ -138,7 +138,6 @@ def save_tg_mapping(phone, tg_id):
 
 
 def get_tg_id_for_phone(phone):
-    """Look up Telegram chat_id for a real phone number"""
     conn = get_db(); cur = conn.cursor()
     cur.execute(
         "SELECT session_data FROM sessions WHERE phone_number=%s AND stage='tg_mapping';",
@@ -153,7 +152,6 @@ def get_tg_id_for_phone(phone):
 
 
 def get_tg_id_for_chat(chat_id):
-    """Find the real phone number for a given telegram chat_id"""
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         SELECT session_data FROM sessions
@@ -193,23 +191,14 @@ def get_volunteer_status(phone):
 
 
 def get_status_for_tg_user(chat_id):
-    """
-    Get volunteer status for a Telegram user.
-    Checks both tg_{chat_id} format and real WA number via mapping.
-    Returns (status, phone) tuple.
-    """
-    # Check tg_ format first
     tg_phone = f"tg_{chat_id}"
     status   = get_volunteer_status(tg_phone)
     if status != "not_found":
         return status, tg_phone
-
-    # Check real phone via tg_mapping
     real_phone = get_tg_id_for_chat(chat_id)
     if real_phone:
         status = get_volunteer_status(real_phone)
         return status, real_phone
-
     return "not_found", None
 
 
@@ -426,7 +415,7 @@ def delete_case_photos(case_id):
 
 
 # ══════════════════════════════════════════════════════════════════
-# WHATSAPP HELPER (for cross-platform admin notifications)
+# WHATSAPP HELPER
 # ══════════════════════════════════════════════════════════════════
 
 def send_whatsapp_message(to, message):
@@ -451,23 +440,62 @@ def send_whatsapp_message(to, message):
         logger.error(f"WA send error to {to}: {e}")
 
 
+# FIX 2: Upload and send photo via WhatsApp API
+def send_whatsapp_photo(to, photo_path, caption=""):
+    """Upload a local photo file and send it to a WhatsApp number."""
+    access_token   = os.getenv("ACCESS_TOKEN")
+    phone_number_id = os.getenv("PHONE_NUMBER_ID")
+    if not access_token or not phone_number_id or not os.path.exists(photo_path):
+        return
+    upload_url = f"https://graph.facebook.com/v18.0/{phone_number_id}/media"
+    headers    = {"Authorization": f"Bearer {access_token}"}
+    try:
+        with open(photo_path, "rb") as f:
+            files = {
+                "file": (photo_path, f, "image/jpeg"),
+                "messaging_product": (None, "whatsapp"),
+                "type": (None, "image/jpeg")
+            }
+            upload_r = requests.post(upload_url, headers=headers, files=files, timeout=(5, 30))
+        upload_r.raise_for_status()
+        media_id = upload_r.json().get("id")
+    except Exception as e:
+        logger.error(f"WA photo upload error for {to}: {e}")
+        return
+    if not media_id: return
+    msg_url  = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+    msg_hdrs = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    msg_data = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "image",
+        "image": {"id": media_id, "caption": caption}
+    }
+    try:
+        requests.post(msg_url, headers=msg_hdrs, json=msg_data, timeout=(5, 20))
+        logger.info(f"WA photo sent to {to}")
+    except Exception as e:
+        logger.error(f"WA photo send error to {to}: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════
 # KEYBOARDS
 # ══════════════════════════════════════════════════════════════════
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚨 Report Injured Animal",   callback_data="action_report")],
+        [InlineKeyboardButton("🚨 Report Injured Animal",     callback_data="action_report")],
         [InlineKeyboardButton("🐾 Volunteer — Join / Status", callback_data="action_volunteer")],
-        [InlineKeyboardButton("📋 Check Case Status",       callback_data="action_status")],
+        [InlineKeyboardButton("📋 Check Case Status",         callback_data="action_status")],
         [InlineKeyboardButton("ℹ️ About Animitr",             callback_data="action_about")],
     ])
 
 def yes_no_keyboard(key):
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Yes",       callback_data=f"yn_{key}_YES"),
-        InlineKeyboardButton("❌ No",        callback_data=f"yn_{key}_NO"),
-        InlineKeyboardButton("🤷 Not Sure",  callback_data=f"yn_{key}_NOT_SURE"),
+        InlineKeyboardButton("✅ Yes",      callback_data=f"yn_{key}_YES"),
+        InlineKeyboardButton("❌ No",       callback_data=f"yn_{key}_NO"),
+        InlineKeyboardButton("🤷 Not Sure", callback_data=f"yn_{key}_NOT_SURE"),
     ]])
 
 def animal_keyboard():
@@ -481,14 +509,14 @@ def animal_keyboard():
 
 def severity_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Low — Minor injury",              callback_data="sev_LOW")],
-        [InlineKeyboardButton("🟡 Medium — Needs attention",        callback_data="sev_MEDIUM")],
+        [InlineKeyboardButton("🟢 Low — Minor injury",               callback_data="sev_LOW")],
+        [InlineKeyboardButton("🟡 Medium — Needs attention",         callback_data="sev_MEDIUM")],
         [InlineKeyboardButton("🔴 High — Critical / Life threatening", callback_data="sev_HIGH")],
     ])
 
 def stay_leave_keyboard():
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🙋 STAY — I'm waiting",  callback_data="stay_STAY"),
+        InlineKeyboardButton("🙋 STAY — I'm waiting",   callback_data="stay_STAY"),
         InlineKeyboardButton("🚶 LEAVE — I have to go", callback_data="stay_LEAVE"),
     ]])
 
@@ -500,20 +528,28 @@ def volunteer_menu_keyboard():
 
 def confirm_rescue_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ YES — Animal is safe",  callback_data="confirm_YES"),
-         InlineKeyboardButton("❌ NO — Something wrong",  callback_data="confirm_NO")],
-        [InlineKeyboardButton("❓ UNSURE",                callback_data="confirm_UNSURE")],
+        [InlineKeyboardButton("✅ YES — Animal is safe", callback_data="confirm_YES"),
+         InlineKeyboardButton("❌ NO — Something wrong", callback_data="confirm_NO")],
+        [InlineKeyboardButton("❓ UNSURE",               callback_data="confirm_UNSURE")],
     ])
 
 def volunteer_action_keyboard(case_id):
+    # FIX 1: Added COMPLETED button alongside ACCEPT button
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✅ Accept Case {case_id}", callback_data=f"vol_accept_{case_id}")],
+        [InlineKeyboardButton(f"✅ COMPLETED {case_id}",   callback_data=f"done_{case_id}")],
+    ])
+
+def volunteer_active_keyboard(case_id):
+    # FIX 1: Keyboard shown AFTER volunteer accepts — only COMPLETED button
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ COMPLETED {case_id}", callback_data=f"done_{case_id}")],
     ])
 
 def still_on_scene_keyboard(case_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📍 STILL ON SCENE",         callback_data=f"scene_{case_id}")],
-        [InlineKeyboardButton(f"✅ COMPLETED {case_id}",   callback_data=f"done_{case_id}")],
+        [InlineKeyboardButton("📍 STILL ON SCENE",       callback_data=f"scene_{case_id}")],
+        [InlineKeyboardButton(f"✅ COMPLETED {case_id}", callback_data=f"done_{case_id}")],
     ])
 
 
@@ -580,7 +616,6 @@ async def alert_all_volunteers(bot, reporter_id, session, urgency, ai_analysis, 
 
     for vol_phone, vol_data in volunteers.items():
         tg_id = tg_id_from_phone(vol_phone)
-        # Also check if real-phone volunteer has a tg_id mapping
         if not tg_id:
             tg_id = get_tg_id_for_phone(vol_phone)
 
@@ -588,22 +623,31 @@ async def alert_all_volunteers(bot, reporter_id, session, urgency, ai_analysis, 
         if tg_id:
             try:
                 await send_tg(bot, tg_id, message, keyboard=volunteer_action_keyboard(case_id))
+                # FIX 2: Send photo to TG volunteers
                 if os.path.exists(report_path):
                     await send_tg_photo(bot, tg_id, report_path, "📸 Reported animal photo")
                 tg_active_cases[tg_id] = {"reporter": str(reporter_id), "case_id": case_id}
             except Exception as e:
                 logger.error(f"Failed to alert TG volunteer {tg_id}: {e}")
 
-        # Also send WhatsApp alert if volunteer has a real phone number (not tg_ format)
+        # FIX 2 + FIX 4: Send WhatsApp alert with separate messages + photo
         if not vol_phone.startswith("tg_"):
             try:
-                wa_message = message + f"\n\n👇 COPY TO ACCEPT THIS CASE:\nRESPONDING {case_id}\n\n👇 COPY WHEN RESCUE IS DONE:\nCOMPLETED {case_id}"
-                send_whatsapp_message(vol_phone, wa_message)
+                # FIX 4: Separate messages exactly like WhatsApp bot does
+                send_whatsapp_message(vol_phone, message)
+                send_whatsapp_message(vol_phone, "👇 COPY TO ACCEPT THIS CASE:")
+                send_whatsapp_message(vol_phone, f"RESPONDING {case_id}")
+                send_whatsapp_message(vol_phone, "👇 COPY WHEN RESCUE IS DONE:")
+                send_whatsapp_message(vol_phone, f"COMPLETED {case_id}")
+                # FIX 2: Send the reporter's Telegram photo to WhatsApp volunteer
+                if os.path.exists(report_path):
+                    send_whatsapp_photo(vol_phone, report_path, "📸 Photo reported by rescue reporter (via Telegram)")
                 logger.info(f"WA alert sent to {vol_phone}")
             except Exception as e:
                 logger.error(f"Failed to alert WA volunteer {vol_phone}: {e}")
 
         alerted.append(vol_phone)
+
     case = load_case(case_id)
     if case:
         case["alerted_volunteers"] = alerted
@@ -611,6 +655,16 @@ async def alert_all_volunteers(bot, reporter_id, session, urgency, ai_analysis, 
 
     threading.Timer(600, lambda: escalate_case_tg(case_id)).start()
 
+    # FIX 5: Notify WhatsApp admin about new Telegram case
+    if ADMIN_NUMBER:
+        send_whatsapp_message(ADMIN_NUMBER,
+            f"📋 NEW CASE (Telegram): {case_id}\n"
+            f"Animal: {session.get('animal','?')} | {urgency}\n"
+            f"Location: {session.get('location','?')}\n"
+            f"Volunteers alerted: {len(alerted)}"
+        )
+
+    # Also notify Telegram admin
     if ADMIN_TG_ID:
         try:
             await send_tg(bot, int(ADMIN_TG_ID),
@@ -941,7 +995,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage   = session.get("stage","")
     flow    = session.get("flow_stage","")
 
-    # ── V2 INPUT VALIDATION: reject text during button-only stages ──
     if flow in BUTTON_ONLY_STAGES:
         await send_tg(context.bot, chat_id,
             "⚠️ Please use the buttons to answer — don't type.\n\nTap one of the options below:"
@@ -949,12 +1002,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_next_question(context.bot, chat_id, session)
         return
 
-    # ── STATUS ──
     if text_up.startswith("STATUS"):
         await handle_status_command(update, context)
         return
 
-    # ── COMPLETED ──
     if text_up.startswith("COMPLETED"):
         parts = text_up.split()
         if len(parts) >= 2:
@@ -965,20 +1016,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ── RESPONDING ──
     if text_up.startswith("RESPONDING"):
         parts            = text_up.split()
         case_id_provided = parts[1] if len(parts) >= 2 else None
         await handle_responding_text(chat_id, case_id_provided, context.bot)
         return
 
-    # ── Reporter confirmation ──
     if chat_id in tg_pending_confirm:
         reply_up = text_up.strip(".,!?")
         handled  = await handle_reporter_confirm(chat_id, reply_up, context.bot)
         if handled: return
 
-    # ── Grace period intercept ──
     if chat_id in tg_pending_transfer:
         data    = tg_pending_transfer[chat_id]
         cid     = data.get("case_id")
@@ -997,20 +1045,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).start()
         return
 
-    # ── Outcome note ──
     if chat_id in tg_pending_outcome:
         data = tg_pending_outcome[chat_id]
         if not text_up.startswith("COMPLETED"):
             note = text.strip()[:500]
             if len(note) >= 5:
-                data["note"]              = note
+                data["note"]                = note
                 tg_pending_outcome[chat_id] = data
                 await send_tg(context.bot, chat_id,
                     f"✅ Note saved.\nWhen done: COMPLETED {data['case_id']}"
                 )
                 return
 
-    # ── Location stage ──
     if flow == "location":
         if not is_valid_location(text):
             await send_tg(context.bot, chat_id,
@@ -1029,7 +1075,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Photo stage ──
     if flow == "photo":
         await send_tg(context.bot, chat_id,
             "📸 Please send a photo of the animal to continue.\n"
@@ -1037,7 +1082,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Volunteer registration: name ──
     if stage == "vol_entering_name":
         name = text.strip()
         if len(name) < 2:
@@ -1051,7 +1095,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Volunteer registration: city ──
     elif stage == "vol_entering_city":
         session["vol_city"] = text.strip()
         session["stage"]    = "vol_entering_phone"
@@ -1064,7 +1107,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Volunteer registration: WhatsApp number ──
     elif stage == "vol_entering_phone":
         wa_number = text.strip().replace("+","").replace(" ","").replace("-","")
         if not wa_number.isdigit() or len(wa_number) < 10:
@@ -1077,7 +1119,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = session.get("vol_name","")
         city = session.get("vol_city","")
 
-        # V2: Approval sync — check if already registered or pending
         existing_status = get_volunteer_status(wa_number)
         if existing_status == "active":
             session["stage"] = ""
@@ -1099,7 +1140,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Save application with real WA phone + tg_id mapping
         save_application(wa_number, name, city, "community", tg_id=chat_id)
         session["stage"] = ""
         tg_sessions[chat_id] = session
@@ -1116,7 +1156,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard=main_menu_keyboard()
         )
 
-        # V2: Notify admin on BOTH WhatsApp AND Telegram
         admin_msg = (
             f"🆕 NEW VOLUNTEER APPLICATION (Telegram)\n\n"
             f"Name: {name}\n"
@@ -1136,14 +1175,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # ── Case ID for status ──
     if stage == "waiting_case_id":
         await show_case_status(chat_id, text.strip().upper(), context.bot)
         session["stage"] = ""
         tg_sessions[chat_id] = session
         return
 
-    # ── Default ──
     await send_tg(context.bot, chat_id,
         "Tap a button below or use /start to see the menu.",
         keyboard=main_menu_keyboard()
@@ -1160,7 +1197,6 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     tg_phone   = f"tg_{chat_id}"
     real_phone = get_tg_id_for_chat(chat_id)
 
-    # ── Completion photo ──
     if chat_id in tg_pending_photo:
         data    = tg_pending_photo.pop(chat_id, {})
         cid     = data.get("case_id")
@@ -1177,7 +1213,6 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await finalize_case_tg(context.bot, chat_id, cid, note, was_acc, photo_result)
         return
 
-    # ── Progress photo from volunteer ──
     volunteers = load_all_active_volunteers()
     is_vol     = tg_phone in volunteers or (real_phone and real_phone in volunteers)
     if is_vol and chat_id in tg_pending_outcome:
@@ -1199,7 +1234,6 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await send_tg(context.bot, chat_id, "✅ Progress photo shared with the reporter.")
         return
 
-    # ── V2: Block photo during button stages ──
     if flow in BUTTON_ONLY_STAGES:
         await send_tg(context.bot, chat_id,
             "⚠️ Please answer the current question using the buttons first."
@@ -1232,7 +1266,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     ai_analysis    = analyze_photo(temp_path, user_answers)
     urgency        = extract_urgency(ai_analysis)
-    reporter_phone = tg_phone  # Reporter stored as tg_{chat_id}
+    reporter_phone = tg_phone
 
     if count_active_cases_for_reporter(reporter_phone) >= 1:
         conn = get_db(); cur = conn.cursor()
@@ -1335,7 +1369,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = tg_sessions.get(chat_id, {})
 
-    # ── MAIN MENU ──
     if data == "action_report":
         session = {"stage": "reporting", "flow_stage": "animal"}
         tg_sessions[chat_id] = session
@@ -1368,7 +1401,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "action_about":
         await send_tg(context.bot, chat_id,
             "🐾 *About Animitr*\n\n"
-            "Animitr is part of the Animitr platform — an AI-powered animal rescue network.\n\n"
+            "Animitr is an AI-powered animal rescue network.\n\n"
             "• Report injured animals via WhatsApp or Telegram\n"
             "• AI photo analysis for triage\n"
             "• Volunteer dispatch system\n"
@@ -1379,7 +1412,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── ANIMAL ──
     if data.startswith("animal_"):
         animal_map = {
             "animal_dog": "Dog", "animal_cat": "Cat",
@@ -1393,7 +1425,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_next_question(context.bot, chat_id, session)
         return
 
-    # ── YES/NO ──
     if data.startswith("yn_"):
         parts     = data.split("_", 2)
         key       = parts[1]
@@ -1408,7 +1439,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_next_question(context.bot, chat_id, session)
         return
 
-    # ── SEVERITY ──
     if data.startswith("sev_"):
         sev_label               = data.replace("sev_","")
         sev_num                 = SEVERITY_MAP.get(sev_label, 5)
@@ -1420,7 +1450,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_next_question(context.bot, chat_id, session)
         return
 
-    # ── STAY/LEAVE ──
     if data.startswith("stay_"):
         choice = data.replace("stay_","")
         if choice == "STAY":
@@ -1440,7 +1469,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_sessions[chat_id]  = session
         return
 
-    # ── VOLUNTEER MENU ──
     if data == "vol_apply":
         status, _ = get_status_for_tg_user(chat_id)
         if status == "active":
@@ -1481,12 +1509,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── VOLUNTEER ACCEPT CASE ──
     if data.startswith("vol_accept_"):
         case_id    = data.replace("vol_accept_","")
         volunteers = load_all_active_volunteers()
 
-        # Find volunteer phone for this TG user
         tg_phone   = f"tg_{chat_id}"
         real_phone = get_tg_id_for_chat(chat_id)
         vol_phone  = None
@@ -1527,14 +1553,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_pending_outcome[chat_id] = {"case_id": case_id, "note": None}
         tg_active_cases.pop(chat_id, None)
 
+        # FIX 1: Show COMPLETED button after accepting
         await send_tg(context.bot, chat_id,
             f"✅ Case accepted — you are now the assigned rescuer.\n\n"
             f"📋 {case_id}\n"
             f"📍 {case['location']}\n"
             f"Animal: {case['animal']} | Severity: {case['severity']}\n\n"
-            f"📝 Send an outcome note anytime.\n"
-            f"When done: COMPLETED {case_id}\n\n"
-            f"⚠️ You MUST send a completion photo when done."
+            f"📝 Send an outcome note anytime.\n\n"
+            f"⚠️ You MUST send a completion photo when done.\n\n"
+            f"When rescue is complete, tap the button below:",
+            keyboard=volunteer_active_keyboard(case_id)
         )
 
         reporter    = case["reporter"]
@@ -1556,7 +1584,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).start()
         return
 
-    # ── STILL ON SCENE ──
     if data.startswith("scene_"):
         case_id = data.replace("scene_","")
         case    = load_case(case_id)
@@ -1568,7 +1595,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_tg(context.bot, chat_id,
             f"✅ Got it — one-time extension granted.\n\n"
             f"Extension: {'10 minutes' if urgency == 'HIGH' else '25 minutes'}\n\n"
-            f"Complete with: COMPLETED {case_id}"
+            f"When rescue is complete, tap below:",
+            keyboard=volunteer_active_keyboard(case_id)
         )
         reporter    = case["reporter"]
         reporter_tg = tg_id_from_phone(reporter) if reporter and reporter.startswith("tg_") else None
@@ -1584,14 +1612,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).start()
         return
 
-    # ── DONE via button ──
     if data.startswith("done_"):
         case_id = data.replace("done_","")
         tg_pending_transfer.pop(chat_id, None)
         await handle_completed_command(chat_id, case_id, context.bot)
         return
 
-    # ── REPORTER CONFIRMATION ──
     if data.startswith("confirm_"):
         reply = data.replace("confirm_","")
         await handle_reporter_confirm(chat_id, reply, context.bot)
@@ -1753,11 +1779,13 @@ async def handle_responding_text(chat_id, case_id_provided, bot):
     save_case(case)
     tg_pending_outcome[chat_id] = {"case_id": case_id_provided, "note": None}
 
+    # FIX 1: Show COMPLETED button here too
     await send_tg(bot, chat_id,
         f"✅ Case {case_id_provided} accepted!\n\n"
         f"📍 {case['location']}\n"
         f"Animal: {case['animal']}\n\n"
-        f"When done: COMPLETED {case_id_provided}"
+        f"When rescue is complete, tap below:",
+        keyboard=volunteer_active_keyboard(case_id_provided)
     )
 
 
