@@ -20,6 +20,8 @@ FIXES IN THIS VERSION:
   NEW — volunteer_applications table for pending applicants
   NEW — blocked_numbers table
   V2  — APPROVE/REJECT now notifies volunteer on Telegram too if registered via Telegram
+  V3  — Fix 3a: WA volunteer accepting TG case notifies TG reporter
+  V3  — Fix 3b: WA volunteer completion photo forwarded to TG reporter
 
 Author: Dhruv Rangan
 """
@@ -184,7 +186,7 @@ def init_db():
     recover_state_from_db()
 
 
-# ── VOLUNTEER CRUD ────────────────────────────────────────────────
+# -- VOLUNTEER CRUD ────────────────────────────────────────────────
 
 def load_volunteers():
     conn = get_db(); cur = conn.cursor()
@@ -211,7 +213,6 @@ def increment_rescues(phone):
     conn.commit(); cur.close(); conn.close()
 
 def add_photo_warning(phone):
-    """Add a photo warning to volunteer. Auto-ban at 5 warnings."""
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         UPDATE volunteers SET photo_warnings = photo_warnings + 1
@@ -228,32 +229,31 @@ def add_photo_warning(phone):
         cur.execute("UPDATE volunteers SET status='banned' WHERE phone_number=%s;", (phone,))
         conn.commit(); cur.close(); conn.close()
         send_message(phone,
-            "🚫 Your Animitr volunteer account has been permanently banned.\n\n"
+            "Your Animitr volunteer account has been permanently banned.\n\n"
             "You have failed to provide a completion photo 5 times.\n\n"
-            "This is a mandatory requirement for all volunteers.\n\n"
             "If you believe this is an error, contact:\ncontact.animitr@gmail.com"
         )
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"🚫 AUTO-BAN: {name} (+{phone})\n"
+                f"AUTO-BAN: {name} (+{phone})\n"
                 "Reason: 5 completion photo warnings reached."
             )
     else:
         remaining = 5 - warnings
         send_message(phone,
-            f"⚠️ Photo Warning {warnings}/5\n\n"
+            f"Photo Warning {warnings}/5\n\n"
             "You did not send a completion photo for your last rescue case.\n\n"
             f"You have {remaining} warning{'s' if remaining > 1 else ''} remaining before your account is banned.\n\n"
             "All future rescues REQUIRE a completion photo before the case can close."
         )
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"⚠️ PHOTO WARNING {warnings}/5: {name} (+{phone})\n"
+                f"PHOTO WARNING {warnings}/5: {name} (+{phone})\n"
                 "Did not submit completion photo."
             )
 
 
-# ── APPLICATIONS CRUD ─────────────────────────────────────────────
+# -- APPLICATIONS CRUD ─────────────────────────────────────────────
 
 def save_application(phone, name, city=None, tier=None):
     conn = get_db(); cur = conn.cursor()
@@ -291,7 +291,7 @@ def get_volunteer_status(phone):
     return app["status"] if app else "not_found"
 
 
-# ── BLOCKED NUMBERS ───────────────────────────────────────────────
+# -- BLOCKED NUMBERS ───────────────────────────────────────────────
 
 def is_blocked(phone):
     conn = get_db(); cur = conn.cursor()
@@ -310,7 +310,7 @@ def unblock_number(phone):
     conn.commit(); cur.close(); conn.close()
 
 
-# ── CASE CRUD ─────────────────────────────────────────────────────
+# -- CASE CRUD ─────────────────────────────────────────────────────
 
 def load_case(case_id):
     conn = get_db(); cur = conn.cursor()
@@ -375,7 +375,7 @@ def create_case(reporter, session, urgency):
         row = cur.fetchone(); cur.close(); conn.close()
         existing = row["case_id"] if row else "your existing case"
         send_message(reporter,
-            f"⚠️ You already have an active rescue case: {existing}\n\n"
+            f"You already have an active rescue case: {existing}\n\n"
             "Reply STATUS to check it.\n"
             "Please wait for it to complete before reporting another animal."
         )
@@ -397,7 +397,7 @@ def create_case(reporter, session, urgency):
     return case_id
 
 
-# ── SESSION CRUD ──────────────────────────────────────────────────
+# -- SESSION CRUD ──────────────────────────────────────────────────
 
 def load_session(phone):
     conn = get_db(); cur = conn.cursor()
@@ -503,7 +503,7 @@ def recover_state_from_db():
             reporter = row["reporter"]; vol_number = row["volunteer_number"]
             if status == "ACCEPTED" and vol_number:
                 active_cases[vol_number] = {"reporter": reporter, "case_id": case_id}
-                print(f"Recovered active_cases: {vol_number} → {case_id}")
+                print(f"Recovered active_cases: {vol_number} -> {case_id}")
             try:
                 if status == "PENDING" and row["time_reported"]:
                     reported_at = datetime.strptime(row["time_reported"], "%d %b %Y, %I:%M %p")
@@ -532,14 +532,58 @@ def recover_state_from_db():
 
 
 # ══════════════════════════════════════════════════════════════════
-# TELEGRAM NOTIFICATION HELPER (for cross-platform approval)
+# TELEGRAM HELPERS (for cross-platform notifications)
 # ══════════════════════════════════════════════════════════════════
+
+def get_tg_id_for_reporter(reporter_phone):
+    """
+    If reporter is a Telegram user (starts with tg_), return their chat_id.
+    Used to notify Telegram reporters when WA volunteer accepts or completes.
+    """
+    if reporter_phone and reporter_phone.startswith("tg_"):
+        try:
+            return int(reporter_phone[3:])
+        except:
+            return None
+    return None
+
+
+def send_telegram_message(chat_id, message):
+    """Send a text message to a Telegram chat_id using the Bot API."""
+    if not TELEGRAM_TOKEN or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=(5, 15)
+        )
+        print(f"TG message sent to {chat_id}")
+    except Exception as e:
+        print(f"TG message error to {chat_id}: {e}")
+
+
+def send_telegram_photo(chat_id, photo_path, caption=""):
+    """Send a local photo file to a Telegram chat_id using the Bot API."""
+    if not TELEGRAM_TOKEN or not chat_id or not os.path.exists(photo_path):
+        return
+    try:
+        with open(photo_path, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"photo": f},
+                timeout=(10, 30)
+            )
+        print(f"TG photo sent to {chat_id}")
+    except Exception as e:
+        print(f"TG photo error to {chat_id}: {e}")
+
 
 def notify_volunteer_on_telegram(phone, message):
     """
-    V2 SURGICAL CHANGE — called after APPROVE or REJECT.
-    Looks up tg_id mapping stored by telegram_bot.py and sends
-    the same message to the volunteer on Telegram if they registered via TG.
+    Called after APPROVE or REJECT in handle_admin_command.
+    Looks up tg_id mapping stored by telegram_bot.py and notifies volunteer on Telegram.
     """
     if not TELEGRAM_TOKEN:
         return
@@ -556,12 +600,8 @@ def notify_volunteer_on_telegram(phone, message):
         tg_chat_id = tg_data.get("tg_id")
         if not tg_chat_id:
             return
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": tg_chat_id, "text": message},
-            timeout=(5, 15)
-        )
-        print(f"TG notification sent to {tg_chat_id} for phone {phone}")
+        send_telegram_message(tg_chat_id, message)
+        print(f"TG approval notification sent to {tg_chat_id} for phone {phone}")
     except Exception as e:
         print(f"TG notify error for {phone}: {e}")
 
@@ -588,11 +628,11 @@ def send_main_menu(to):
     send_message(to,
         "Welcome to Animitr.\n\n"
         "Available keywords:\n"
-        "• REPORT — report an injured animal\n"
-        "• STATUS CASE-[CASE-ID] — check rescue status\n"
-        "• JOIN — apply as volunteer\n"
-        "• VSTATUS — check volunteer application status\n"
-        "• HELP — show this menu again\n\n"
+        "REPORT -- report an injured animal\n"
+        "STATUS CASE-[CASE-ID] -- check rescue status\n"
+        "JOIN -- apply as volunteer\n"
+        "VSTATUS -- check volunteer application status\n"
+        "HELP -- show this menu again\n\n"
         "To start a new rescue report, type: REPORT"
     )
 
@@ -647,7 +687,7 @@ def upload_and_send_photo(to, photo_path, caption=""):
         print(f"Photo send error to {to}: {e}")
 
 def send_photo_to_volunteer(to, case_id):
-    upload_and_send_photo(to, f"report_{case_id}.jpg", "📸 Photo reported by rescue reporter")
+    upload_and_send_photo(to, f"report_{case_id}.jpg", "Photo reported by rescue reporter")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -664,22 +704,22 @@ def escalate_case(case_id):
     if remaining:
         for vol in remaining:
             send_message(vol,
-                f"🚨 ESCALATION ALERT 🚨\nNo volunteer responded in 10 minutes!\n\n"
+                f"ESCALATION ALERT\nNo volunteer responded in 10 minutes!\n\n"
                 f"Case ID: {case_id}\nAnimal: {case['animal']}\n"
-                f"Severity: {case['severity']}/10\n📍 {case['location']}\n\n"
+                f"Severity: {case['severity']}/10\nLocation: {case['location']}\n\n"
                 f"Reporter: +{case['reporter']}"
             )
-            send_message(vol, "👇 COPY TO ACCEPT THIS CASE:")
+            send_message(vol, "COPY TO ACCEPT THIS CASE:")
             send_message(vol, f"RESPONDING {case_id}")
-            send_message(vol, "👇 COPY WHEN RESCUE IS DONE:")
+            send_message(vol, "COPY WHEN RESCUE IS DONE:")
             send_message(vol, f"COMPLETED {case_id}")
             active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
             alerted.append(vol)
         case["alerted_volunteers"] = alerted; save_case(case)
-        send_message(case["reporter"], f"⏰ Update on {case_id}:\nStill looking for a volunteer. Additional team alerted. Help is coming.")
+        send_message(case["reporter"], f"Update on {case_id}:\nStill looking for a volunteer. Additional team alerted. Help is coming.")
     else:
         send_message(case["reporter"],
-            f"⚠️ Update on {case_id}:\nAll volunteers alerted.\n\n📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027\n\nPlease contact them directly while we keep trying."
+            f"Update on {case_id}:\nAll volunteers alerted.\n\nAnimal Helpline: 1962\nSPCA: 011-23619027\n\nPlease contact them directly while we keep trying."
         )
 
 def warn_ghost_volunteer(case_id):
@@ -689,22 +729,22 @@ def warn_ghost_volunteer(case_id):
     vol_num  = case.get("volunteer_number")
     vol_name = case.get("volunteer", "Volunteer")
     urgency  = case.get("urgency", "MEDIUM")
-    print(f"Ghost warning sent: {case_id} → {vol_name} ({vol_num})")
+    print(f"Ghost warning sent: {case_id} -> {vol_name} ({vol_num})")
     pending_transfer[vol_num] = {
         "case_id":   case_id,
         "warned_at": datetime.now().isoformat(),
         "urgency":   urgency,
     }
     send_message(vol_num,
-        f"⚠️ CASE UPDATE REQUIRED — {case_id}\n\n"
+        f"CASE UPDATE REQUIRED -- {case_id}\n\n"
         f"You accepted this rescue {10 if urgency == 'HIGH' else 25} minutes ago "
         f"and no completion has been logged.\n\n"
         "Your case is being transferred in 2 minutes unless you reply.\n\n"
         "Reply anything right now to keep the case:\n"
-        "• STILL_ON_SCENE — if you are still at location\n"
-        f"• COMPLETED {case_id} — if rescue is done\n"
-        "• Your outcome note — to log progress\n\n"
-        "⏳ You have 2 minutes."
+        "STILL_ON_SCENE -- if you are still at location\n"
+        f"COMPLETED {case_id} -- if rescue is done\n"
+        "Your outcome note -- to log progress\n\n"
+        "You have 2 minutes."
     )
     t = threading.Timer(120, reopen_stale_case, args=[case_id])
     t.daemon = True
@@ -719,7 +759,7 @@ def reopen_stale_case(case_id):
     stale_vol = case.get("volunteer", "The volunteer")
     stale_num = case.get("volunteer_number")
     urgency   = case.get("urgency", "MEDIUM")
-    print(f"Reopening stale case {case_id} — {stale_vol} ghosted")
+    print(f"Reopening stale case {case_id} -- {stale_vol} ghosted")
     pending_transfer.pop(stale_num, None)
     case["status"]           = "PENDING"
     case["volunteer"]        = None
@@ -730,13 +770,13 @@ def reopen_stale_case(case_id):
         active_cases.pop(stale_num, None)
         pending_outcome.pop(stale_num, None)
         send_message(stale_num,
-            f"🔄 Case {case_id} has been transferred to another volunteer.\n\n"
+            f"Case {case_id} has been transferred to another volunteer.\n\n"
             "You did not respond within the time window.\n\n"
             f"If you are still at the scene, please text RESPONDING to re-accept\n"
             f"or COMPLETED {case_id} if the rescue is already done."
         )
     send_message(case["reporter"],
-        f"🔄 Update on {case_id}:\n\n"
+        f"Update on {case_id}:\n\n"
         "Our volunteer was unable to complete the rescue in time.\n"
         "We are alerting backup volunteers now. Help is still on the way.\n\n"
         "We apologise for the delay."
@@ -746,20 +786,20 @@ def reopen_stale_case(case_id):
         if vol == stale_num:
             continue
         send_message(vol,
-            f"🔄 REACTIVATED CASE — {case_id}\n\n"
+            f"REACTIVATED CASE -- {case_id}\n\n"
             f"Previous volunteer did not respond in time.\n\n"
             f"Animal: {case['animal']}\nSeverity: {case['severity']}/10\n"
-            f"📍 {case['location']}"
+            f"Location: {case['location']}"
         )
-        send_message(vol, "👇 COPY TO ACCEPT THIS CASE:")
+        send_message(vol, "COPY TO ACCEPT THIS CASE:")
         send_message(vol, f"RESPONDING {case_id}")
-        send_message(vol, "👇 COPY WHEN RESCUE IS DONE:")
+        send_message(vol, "COPY WHEN RESCUE IS DONE:")
         send_message(vol, f"COMPLETED {case_id}")
         active_cases[vol] = {"reporter": case["reporter"], "case_id": case_id}
     start_escalation_timer(case_id, delay_seconds=600)
     if ADMIN_NUMBER:
         send_message(ADMIN_NUMBER,
-            f"⚠️ GHOST VOLUNTEER: Case {case_id} transferred.\n"
+            f"GHOST VOLUNTEER: Case {case_id} transferred.\n"
             f"Ghost: {stale_vol} (+{stale_num})\n"
             f"Animal: {case['animal']} | {urgency}\n"
             f"Location: {case['location']}"
@@ -774,14 +814,14 @@ def handle_still_on_scene(sender, case_id):
     urgency = case.get("urgency", "MEDIUM")
     pending_transfer.pop(sender, None)
     send_message(sender,
-        f"✅ Got it. You have been given a one-time extension.\n\n"
+        f"Got it. You have been given a one-time extension.\n\n"
         f"Extension time: {'10 minutes' if urgency == 'HIGH' else '25 minutes'}\n\n"
         "Please complete the rescue and send:\n"
         f"COMPLETED {case_id}\n\n"
         "No further extensions will be given after this."
     )
     send_message(case["reporter"],
-        f"🔄 Update on {case_id}:\n\n"
+        f"Update on {case_id}:\n\n"
         "Your volunteer has confirmed they are still at the scene.\n"
         "The rescue is in progress."
     )
@@ -789,7 +829,7 @@ def handle_still_on_scene(sender, case_id):
     t = threading.Timer(extension, reopen_stale_case, args=[case_id])
     t.daemon = True
     t.start()
-    print(f"Extension granted: {case_id} ({urgency}) → {extension}s")
+    print(f"Extension granted: {case_id} ({urgency}) -> {extension}s")
 
 
 def start_escalation_timer(case_id, delay_seconds=600):
@@ -804,7 +844,7 @@ def start_acceptance_timeout(case_id, volunteer_name, urgency, delay_seconds=Non
     t = threading.Timer(delay_seconds, warn_ghost_volunteer, args=[case_id])
     t.daemon = True
     t.start()
-    print(f"Acceptance timeout ({urgency}): {case_id} — {delay_seconds}s until warning")
+    print(f"Acceptance timeout ({urgency}): {case_id} -- {delay_seconds}s until warning")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -930,11 +970,11 @@ Their message: "{user_answer}"
 {type_instructions.get(question_type, "Return the cleaned answer or UNCLEAR.")}
 
 Additional rules:
-- "haan","ji","yep","bilkul","theek hai","ok" → YES
-- "nahi","nope","na","nah" → NO
-- "bahut bura hai","very bad","critical" → 8 or 9
-- "thoda","minor","not that bad" → 2 or 3
-- Numbers like "9" for animal question → UNCLEAR
+- "haan","ji","yep","bilkul","theek hai","ok" -> YES
+- "nahi","nope","na","nah" -> NO
+- "bahut bura hai","very bad","critical" -> 8 or 9
+- "thoda","minor","not that bad" -> 2 or 3
+- Numbers like "9" for animal question -> UNCLEAR
 - Do NOT explain. Return ONLY the value."""
 
     try:
@@ -946,7 +986,7 @@ Additional rules:
         result = r.choices[0].message.content.strip().upper().strip(".,!?\"'")
         if question_type in ("yes_no", "animal") and " " in result:
             result = result.split()[0]
-        print(f"GROQ: '{user_answer}' → '{result}'")
+        print(f"GROQ: '{user_answer}' -> '{result}'")
         return result
     except Exception as e:
         print(f"Groq interpret error: {e}")
@@ -981,20 +1021,20 @@ Reply ONLY: YES or NO"""
 # ══════════════════════════════════════════════════════════════════
 
 ALL_QUESTION_MAP = {
-    "animal":         ("animal",  "Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
+    "animal":         ("animal",  "Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other -- please specify"),
     "bleeding":       ("yes_no",  "Is the animal bleeding?\n\nReply YES / NO / NOT SURE"),
     "can_move":       ("yes_no",  "Can the animal move on its own?\n\nReply YES / NO / NOT SURE"),
     "wounds":         ("yes_no",  "Are there any visible wounds or injuries?\n\nReply YES / NO / NOT SURE"),
     "eating":         ("yes_no",  "Is the animal eating or drinking?\n\nReply YES / NO / NOT SURE"),
     "duration":       ("text",    "How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
     "behavior":       ("text",    "Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious, not sure)"),
-    "ground_support": ("yes_no",  "Is there anyone with the animal right now?\n\nYES — please share their WhatsApp number\nNO — rescuer will be dispatched urgently\nNOT SURE — reply NOT SURE"),
+    "ground_support": ("yes_no",  "Is there anyone with the animal right now?\n\nYES -- please share their WhatsApp number\nNO -- rescuer will be dispatched urgently\nNOT SURE -- reply NOT SURE"),
 }
 
 def get_next_question(session):
     severity = session.get("severity", 0); answered = session.get("answered", [])
     base = [
-        ("animal","animal","Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify"),
+        ("animal","animal","Which animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other -- please specify"),
         ("bleeding","yes_no","Is the animal bleeding?\n\nReply YES / NO / NOT SURE"),
         ("can_move","yes_no","Can the animal move on its own?\n\nReply YES / NO / NOT SURE"),
     ]
@@ -1004,16 +1044,16 @@ def get_next_question(session):
         ("duration","text","How long has the animal been in this condition?\n\n(Example: 1 hour, since morning, not sure)"),
     ]
     mild_extra = moderate + [("behavior","text","Is the animal aggressive or calm?\n\n(Example: calm, scared, aggressive, unconscious)")]
-    support = ("ground_support","yes_no","Is there anyone with the animal right now?\n\nYES — please share their WhatsApp number\nNO — our rescuer will be dispatched urgently")
+    support = ("ground_support","yes_no","Is there anyone with the animal right now?\n\nYES -- please share their WhatsApp number\nNO -- our rescuer will be dispatched urgently")
     location = ("location","text",
-        "Please share the exact location of the animal 📍\n\nOption 1 — Live location (recommended):\nTap the 📎 attachment icon\n→ Select Location\n→ Share Live Location\n\n"
-        "Option 2 — Type address:\nInclude area name + landmark + city\n\nExample: Near Sector 5 Metro, Rohini, New Delhi\n\n⚠️ Accurate location = faster rescue.")
+        "Please share the exact location of the animal\n\nOption 1 -- Live location (recommended):\nTap the attachment icon\nSelect Location\nShare Live Location\n\n"
+        "Option 2 -- Type address:\nInclude area name + landmark + city\n\nExample: Near Sector 5 Metro, Rohini, New Delhi\n\nAccurate location = faster rescue.")
     if   severity >= 7: all_q = base + [support] + [location]
     elif severity >= 4: all_q = base + moderate   + [support] + [location]
     else:               all_q = base + mild_extra + [support] + [location]
     for key, qtype, question in all_q:
         if key not in answered: return key, qtype, question
-    return "photo","text","Almost done! Please send a clear photo of the animal 📸\n\nTips:\n• Get as close as safely possible\n• Make sure the animal is clearly in frame\n• Good lighting helps our AI analyse the injury\n\nSend the photo now 👇"
+    return "photo","text","Almost done! Please send a clear photo of the animal\n\nTips:\nGet as close as safely possible\nMake sure the animal is clearly in frame\nGood lighting helps our AI analyse the injury\n\nSend the photo now"
 
 def advance_to_next(sender, session):
     next_key, next_qtype, next_question = get_next_question(session)
@@ -1033,20 +1073,20 @@ def send_first_aid(sender, session):
     animal = session.get("animal","animal").lower()
     bleeding = session.get("bleeding","NO"); can_move = session.get("can_move","YES")
     severity = session.get("severity", 5)
-    note = "⚠️ Serious case. Do not move the animal unless absolutely necessary.\n\n" if severity >= 7 else ""
+    note = "Serious case. Do not move the animal unless absolutely necessary.\n\n" if severity >= 7 else ""
     tips = []
-    if bleeding == "YES": tips.append("🩸 Gentle pressure with clean cloth. Do not remove it.")
-    if can_move == "NO":  tips.append("🚫 Do not lift or drag — can cause more injury.")
-    if   animal == "dog":  tips += ["🐕 Keep people away.", "💧 Offer water only if conscious and calm."]
-    elif animal == "cat":  tips += ["🐈 Very still and quiet near them.", "🧤 Loosely cover with cloth — reduces panic."]
-    elif animal == "cow":  tips += ["🐄 Keep crowd away.", "☀️ Shade if in direct sun."]
-    elif animal == "bird": tips += ["🐦 Loosely cover with cloth.", "🌡️ Keep warm — birds shock quickly."]
-    else:                  tips += ["🐾 Stay calm, keep distance.", "👥 Ask bystanders to move away."]
-    tips += ["📵 Low noise.", "🚫 No food or medicine without vet."]
+    if bleeding == "YES": tips.append("Gentle pressure with clean cloth. Do not remove it.")
+    if can_move == "NO":  tips.append("Do not lift or drag -- can cause more injury.")
+    if   animal == "dog":  tips += ["Keep people away.", "Offer water only if conscious and calm."]
+    elif animal == "cat":  tips += ["Very still and quiet near them.", "Loosely cover with cloth -- reduces panic."]
+    elif animal == "cow":  tips += ["Keep crowd away.", "Shade if in direct sun."]
+    elif animal == "bird": tips += ["Loosely cover with cloth.", "Keep warm -- birds shock quickly."]
+    else:                  tips += ["Stay calm, keep distance.", "Ask bystanders to move away."]
+    tips += ["Low noise.", "No food or medicine without vet."]
     send_message(sender,
-        "🐾 First Aid While You Wait:\n\n" + note + "\n".join(tips) +
+        "First Aid While You Wait:\n\n" + note + "\n".join(tips) +
         "\n\nVolunteer being alerted. You'll be notified when someone accepts.\n\n"
-        "━━━━━━━━━━━━━━━\nCan you stay with the animal?\n\nReply STAY — I am waiting\nReply LEAVE — I have to leave"
+        "Can you stay with the animal?\n\nReply STAY -- I am waiting\nReply LEAVE -- I have to leave"
     )
 
 
@@ -1059,21 +1099,21 @@ def connect_reporter_volunteer(reporter, vol_phone, vol_name):
     case_id = case_data.get("case_id") if isinstance(case_data, dict) else None
     if case_id:
         send_message(vol_phone,
-            f"✅ Reporter is waiting at location for case {case_id}.\n"
+            f"Reporter is waiting at location for case {case_id}.\n"
             f"Reporter: +{reporter}\n\n"
             "Please coordinate directly and proceed safely."
         )
         send_message(reporter,
-            f"✅ Connected with volunteer {vol_name} (+{vol_phone}) for case {case_id}."
+            f"Connected with volunteer {vol_name} (+{vol_phone}) for case {case_id}."
         )
     else:
         send_message(vol_phone,
-            f"✅ Reporter is waiting at location.\n"
+            f"Reporter is waiting at location.\n"
             f"Reporter: +{reporter}\n\n"
             "Please proceed safely."
         )
         send_message(reporter,
-            f"✅ Connected with volunteer {vol_name} (+{vol_phone})."
+            f"Connected with volunteer {vol_name} (+{vol_phone})."
         )
 
 def handle_responding(sender, volunteer_name, case_data):
@@ -1082,42 +1122,56 @@ def handle_responding(sender, volunteer_name, case_data):
     if not case:
         send_message(sender, "Case not found. Please check your rescue alert and try again."); return
     if case["status"] == "COMPLETED":
-        send_message(sender, f"Case {case_id_found} has already been completed. Thank you! 🐾"); return
+        send_message(sender, f"Case {case_id_found} has already been completed. Thank you!"); return
     if case["status"] == "ACCEPTED" and case["volunteer_number"] != sender:
-        send_message(sender, f"Case {case_id_found} has already been accepted by another volunteer.\nThank you for responding — please wait for the next alert."); return
+        send_message(sender, f"Case {case_id_found} has already been accepted by another volunteer.\nThank you for responding -- please wait for the next alert."); return
     case["status"] = "ACCEPTED"; case["volunteer"] = volunteer_name
     case["volunteer_number"] = sender; case["time_accepted"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
     save_case(case)
     rp = waiting_reporters.get(reporter)
-    rp_text = ("✅ Reporter IS waiting." if rp is True else "⚠️ Reporter has LEFT." if rp is False else "ℹ️ Reporter presence unknown.")
+    rp_text = ("Reporter IS waiting." if rp is True else "Reporter has LEFT." if rp is False else "Reporter presence unknown.")
     send_message(sender,
-        f"✅ Case accepted — you are now the assigned rescuer.\n\n"
-        f"📋 {case_id_found}\n📍 {case['location']}\nAnimal: {case['animal']} | Severity: {case['severity']}/10\n"
+        f"Case accepted -- you are now the assigned rescuer.\n\n"
+        f"{case_id_found}\nLocation: {case['location']}\nAnimal: {case['animal']} | Severity: {case['severity']}/10\n"
         f"Reporter: +{reporter}\n{rp_text}\n\n"
-        f"📝 Send an outcome note anytime, then:\nCOMPLETED {case_id_found}\n\n"
-        f"⚠️ You MUST send a completion photo when done.\nThis is mandatory for all Animitr volunteers."
+        f"Send an outcome note anytime, then:\nCOMPLETED {case_id_found}\n\n"
+        f"You MUST send a completion photo when done.\nThis is mandatory for all Animitr volunteers."
     )
-    send_message(reporter,
-        f"🐾 A volunteer has accepted your rescue case!\n\n"
-        f"Volunteer: {volunteer_name}\nContact: +{sender}\n\n"
-        "They are heading to the location now.\n\n"
-        "📌 Important: When the rescue is complete, you will receive a photo "
-        "from the volunteer. Please stay available — we will ask you to confirm "
-        "that the animal looks safe. Your confirmation matters. 🐾"
-    )
+
+    # FIX 3a: If reporter is a Telegram user, notify them on Telegram that WA volunteer accepted
+    reporter_tg_id = get_tg_id_for_reporter(reporter)
+    if reporter_tg_id:
+        send_telegram_message(reporter_tg_id,
+            f"🐾 A volunteer has accepted your rescue case!\n\n"
+            f"Volunteer: {volunteer_name}\n\n"
+            "They are heading to the location now.\n\n"
+            "You will receive a photo when the rescue is complete."
+        )
+    else:
+        # Reporter is on WhatsApp — send normal WA message
+        send_message(reporter,
+            f"A volunteer has accepted your rescue case!\n\n"
+            f"Volunteer: {volunteer_name}\nContact: +{sender}\n\n"
+            "They are heading to the location now.\n\n"
+            "When the rescue is complete, you will receive a photo from the volunteer.\n"
+            "Please stay available -- we will ask you to confirm that the animal looks safe."
+        )
+
     pending_outcome[sender] = {"case_id": case_id_found, "note": None}
     active_cases.pop(sender, None); pending_volunteer_responses.pop(sender, None)
 
     def send_reminder():
         c = load_case(case_id_found)
         if c and c["status"] == "ACCEPTED":
-            send_message(reporter,
-                f"🔔 Reminder for case {case_id_found}:\n\n"
-                "Your rescue is in progress.\n\n"
-                "When complete, you will receive a photo from the volunteer. "
-                "Please reply YES or NO when asked if the animal looks safe.\n\n"
-                "Your response helps us verify every rescue. Thank you."
-            )
+            # Only send reminder to WA reporters
+            if not reporter.startswith("tg_"):
+                send_message(reporter,
+                    f"Reminder for case {case_id_found}:\n\n"
+                    "Your rescue is in progress.\n\n"
+                    "When complete, you will receive a photo from the volunteer. "
+                    "Please reply YES or NO when asked if the animal looks safe.\n\n"
+                    "Your response helps us verify every rescue. Thank you."
+                )
     t = threading.Timer(900, send_reminder); t.daemon = True; t.start()
     start_acceptance_timeout(case_id_found, volunteer_name, case.get("urgency","MEDIUM"))
 
@@ -1128,7 +1182,7 @@ def handle_outcome_note(sender, text):
     if len(note) < 5:
         send_message(sender, "Please write a proper outcome note (minimum 5 characters).\nExample: Taken to Blue Cross clinic. Stable."); return True
     data["note"] = note; pending_outcome[sender] = data
-    send_message(sender, f"✅ Note saved.\nWhen done: COMPLETED {data['case_id']}"); return True
+    send_message(sender, f"Note saved.\nWhen done: COMPLETED {data['case_id']}"); return True
 
 def handle_photo_deadline(vol_phone, case_id):
     if vol_phone not in pending_completion_photo:
@@ -1148,12 +1202,20 @@ def handle_photo_deadline(vol_phone, case_id):
     pending_outcome.pop(vol_phone, None)
     add_photo_warning(vol_phone)
     reporter = case["reporter"]
-    send_message(reporter,
-        f"🐾 Your rescue case {case_id} has been closed.\n\n"
+
+    # Notify reporter (WA or TG)
+    reporter_tg_id = get_tg_id_for_reporter(reporter)
+    photo_missing_msg = (
+        f"Your rescue case {case_id} has been closed.\n\n"
         "Note: The volunteer did not provide a completion photo.\n"
         "Our admin team has been alerted and will follow up.\n\n"
         "If the animal did not receive help, please reply NO to this message."
     )
+    if reporter_tg_id:
+        send_telegram_message(reporter_tg_id, photo_missing_msg)
+    else:
+        send_message(reporter, photo_missing_msg)
+
     pending_reporter_confirm[reporter] = {
         "case_id":       case_id,
         "volunteer_name": case.get("volunteer","Volunteer"),
@@ -1162,7 +1224,7 @@ def handle_photo_deadline(vol_phone, case_id):
     }
     if ADMIN_NUMBER:
         send_message(ADMIN_NUMBER,
-            f"⚠️ PHOTO MISSING: {case_id}\n"
+            f"PHOTO MISSING: {case_id}\n"
             f"Volunteer: {case.get('volunteer')} (+{vol_phone})\n"
             f"Animal: {case['animal']} at {case['location']}\n"
             "Rescue count NOT incremented. Admin review required."
@@ -1183,25 +1245,45 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
     reporter     = case["reporter"]
     vol_name     = case.get("volunteer", "Volunteer")
     completion_p = f"completion_{case_id}.jpg"
+
     send_message(vol_phone,
-        f"✅ Case {case_id} — completion photo received.\n\n"
-        "Thank you for showing up and for documenting the rescue. 🐾\n\n"
+        f"Case {case_id} -- completion photo received.\n\n"
+        "Thank you for showing up and for documenting the rescue.\n\n"
         "The reporter will confirm and your rescue count will be updated.\n\n"
-        "You made a real difference. 💚"
+        "You made a real difference."
     )
-    upload_and_send_photo(reporter, completion_p,
-        f"📸 Your volunteer {vol_name} has completed the rescue for case {case_id}."
-    )
-    send_message(reporter,
-        f"🐾 Rescue update for case {case_id}:\n\n"
-        f"Volunteer {vol_name} has marked this rescue as complete "
-        "and sent the photo above.\n\n"
-        "Please confirm:\n"
-        "✅ Reply YES — animal looks safe and rescued\n"
-        "❌ Reply NO — something looks wrong\n"
-        "❓ Reply UNSURE — you cannot tell\n\n"
-        "Your reply helps us verify every rescue. Thank you."
-    )
+
+    # FIX 3b: If reporter is Telegram user, send completion photo + confirmation to Telegram
+    reporter_tg_id = get_tg_id_for_reporter(reporter)
+    if reporter_tg_id:
+        if os.path.exists(completion_p):
+            send_telegram_photo(reporter_tg_id, completion_p,
+                f"Your volunteer {vol_name} completed the rescue for case {case_id}."
+            )
+        send_telegram_message(reporter_tg_id,
+            f"Rescue update for case {case_id}:\n\n"
+            f"Volunteer {vol_name} has marked this rescue as complete.\n\n"
+            "Please confirm -- does the animal look safe?\n\n"
+            "Reply YES -- animal looks safe\n"
+            "Reply NO -- something looks wrong\n"
+            "Reply UNSURE -- you cannot tell"
+        )
+    else:
+        # Reporter is on WhatsApp -- send normally
+        upload_and_send_photo(reporter, completion_p,
+            f"Your volunteer {vol_name} has completed the rescue for case {case_id}."
+        )
+        send_message(reporter,
+            f"Rescue update for case {case_id}:\n\n"
+            f"Volunteer {vol_name} has marked this rescue as complete "
+            "and sent the photo above.\n\n"
+            "Please confirm:\n"
+            "Reply YES -- animal looks safe and rescued\n"
+            "Reply NO -- something looks wrong\n"
+            "Reply UNSURE -- you cannot tell\n\n"
+            "Your reply helps us verify every rescue. Thank you."
+        )
+
     pending_reporter_confirm[reporter] = {
         "case_id":        case_id,
         "volunteer_name": vol_name,
@@ -1210,10 +1292,11 @@ def finalize_case_closure(vol_phone, case_id, note, was_accepted, photo_result):
         "was_accepted":   was_accepted,
         "photo_missing":  False,
     }
+
     if photo_result == "NO_MATCH":
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"🚨 PHOTO MISMATCH: {case_id}\n"
+                f"PHOTO MISMATCH: {case_id}\n"
                 f"Volunteer: {vol_name} (+{vol_phone})\n"
                 f"Gemini says completion photo does NOT match report photo.\n"
                 f"Animal: {case['animal']} at {case['location']}\n"
@@ -1239,25 +1322,33 @@ def handle_reporter_confirmation(reporter, reply):
     reply_up = reply.strip().upper().strip(".,!?")
     reply_words = set(reply_up.split())
 
+    reporter_tg_id = get_tg_id_for_reporter(reporter)
+
+    def notify_reporter(msg):
+        if reporter_tg_id:
+            send_telegram_message(reporter_tg_id, msg)
+        else:
+            send_message(reporter, msg)
+
     if reply_up in ("YES","Y","HAAN","JI","HAN") or "YES" in reply_words:
-        send_message(reporter,
-            f"✅ Thank you for confirming.\n\n"
+        notify_reporter(
+            f"Thank you for confirming.\n\n"
             f"Case {case_id} is now fully verified.\n\n"
-            "Your report saved an animal today. 🐾"
+            "Your report saved an animal today."
         )
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"✅ CONFIRMED: {case_id} — Reporter verified rescue.\nVolunteer: {vol_name}"
+                f"CONFIRMED: {case_id} -- Reporter verified rescue.\nVolunteer: {vol_name}"
             )
         clear_reporter_session(reporter)
         return True
 
     elif reply_up in ("NO","N","NAHI","NAH","NOPE") or "NO" in reply_words:
-        send_message(reporter,
-            f"⚠️ Thank you for letting us know.\n\n"
+        notify_reporter(
+            f"Thank you for letting us know.\n\n"
             "Our admin team has been alerted and will investigate immediately.\n\n"
             "If the animal is still in danger, please call:\n"
-            "📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027"
+            "Animal Helpline: 1962\nSPCA: 011-23619027"
         )
         if was_accepted and not photo_missing:
             conn = get_db(); cur = conn.cursor()
@@ -1266,10 +1357,10 @@ def handle_reporter_confirmation(reporter, reply):
                 WHERE phone_number = %s;
             """, (vol_phone,))
             conn.commit(); cur.close(); conn.close()
-            print(f"Rescue count reversed for {vol_phone} — reporter denied.")
+            print(f"Rescue count reversed for {vol_phone} -- reporter denied.")
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"🚨 REPORTER DENIED RESCUE: {case_id}\n"
+                f"REPORTER DENIED RESCUE: {case_id}\n"
                 f"Volunteer: {vol_name} (+{vol_phone})\n"
                 "Rescue count REVERSED. Immediate investigation required.\n"
                 f"Use REMOVE_VOL {vol_phone} if fraud confirmed."
@@ -1278,13 +1369,13 @@ def handle_reporter_confirmation(reporter, reply):
         return True
 
     elif "UNSURE" in reply_words or "NOT SURE" in reply_up or reply_up in ("UNSURE","IDK","NOT SURE","MAYBE","CANT SAY"):
-        send_message(reporter,
+        notify_reporter(
             f"Understood. We have logged your uncertainty for case {case_id}.\n\n"
             "Our team will review the case. Thank you for responding."
         )
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"❓ REPORTER UNSURE: {case_id}\n"
+                f"REPORTER UNSURE: {case_id}\n"
                 f"Volunteer: {vol_name} (+{vol_phone})\n"
                 "Manual review recommended."
             )
@@ -1297,10 +1388,10 @@ def handle_reporter_confirmation(reporter, reply):
 def handle_reporter_confirmation_deadline(reporter, case_id, vol_phone, was_accepted):
     if reporter in pending_reporter_confirm:
         pending_reporter_confirm.pop(reporter, None)
-        print(f"Reporter {reporter} didn't confirm case {case_id} — flagging to admin")
+        print(f"Reporter {reporter} didn't confirm case {case_id} -- flagging to admin")
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"⏰ NO REPORTER REPLY: {case_id}\n"
+                f"NO REPORTER REPLY: {case_id}\n"
                 f"Reporter (+{reporter}) did not confirm rescue within 2 hours.\n"
                 "Case remains closed. Rescue count stands. Manual review if needed."
             )
@@ -1325,17 +1416,17 @@ def handle_status(sender, text):
     is_volunteer = (sender in volunteers)
     if not is_reporter and not is_assigned:
         if is_volunteer:
-            send_message(sender, f"📋 Case {case_id}\nStatus: {case['status']}\nAnimal: {case['animal']}\n\nFull details only available to the assigned volunteer.")
+            send_message(sender, f"Case {case_id}\nStatus: {case['status']}\nAnimal: {case['animal']}\n\nFull details only available to the assigned volunteer.")
         else:
-            send_message(sender, "❌ You can only check status of cases you reported.")
+            send_message(sender, "You can only check status of cases you reported.")
         return
-    status_text = ("⏳ Waiting for volunteer" if case["status"]=="PENDING" else
-                   f"🚑 Volunteer {case['volunteer']} is on the way" if case["status"]=="ACCEPTED" else "✅ Rescue completed")
-    msg = (f"📋 CASE STATUS\n\nCase ID: {case_id}\nAnimal: {case['animal']}\nLocation: {case['location']}\n"
+    status_text = ("Waiting for volunteer" if case["status"]=="PENDING" else
+                   f"Volunteer {case['volunteer']} is on the way" if case["status"]=="ACCEPTED" else "Rescue completed")
+    msg = (f"CASE STATUS\n\nCase ID: {case_id}\nAnimal: {case['animal']}\nLocation: {case['location']}\n"
            f"Severity: {case['severity']}/10\nReported: {case['time_reported']}\n\nStatus: {status_text}\n")
     if case.get("time_accepted"):  msg += f"Accepted: {case['time_accepted']}\n"
     if case.get("time_completed"): msg += f"Completed: {case['time_completed']}\n"
-    if case.get("outcome"):        msg += f"\n📝 Outcome: \"{case['outcome']}\""
+    if case.get("outcome"):        msg += f"\nOutcome: \"{case['outcome']}\""
     send_message(sender, msg)
 
 def handle_completed(sender, text):
@@ -1346,11 +1437,11 @@ def handle_completed(sender, text):
     if not case:
         send_message(sender, f"Case {case_id} not found."); return
     if case["status"] == "COMPLETED":
-        send_message(sender, f"Case {case_id} is already completed. 🐾"); return
+        send_message(sender, f"Case {case_id} is already completed."); return
     is_assigned = (case.get("volunteer_number") == sender)
     is_reporter  = (case.get("reporter") == sender)
     if not is_assigned and not is_reporter:
-        send_message(sender, "❌ You are not authorized to complete this case.\nOnly the assigned volunteer can mark a rescue complete."); return
+        send_message(sender, "You are not authorized to complete this case.\nOnly the assigned volunteer can mark a rescue complete."); return
     if is_reporter and not is_assigned:
         if case["status"] == "ACCEPTED":
             try:
@@ -1358,7 +1449,7 @@ def handle_completed(sender, text):
                 hours_elapsed = (datetime.now() - accepted_at).total_seconds() / 3600
             except: hours_elapsed = 0
             if hours_elapsed < 3:
-                send_message(sender, "⏳ A volunteer is still assigned to your case.\nPlease wait for them to complete the rescue."); return
+                send_message(sender, "A volunteer is still assigned to your case.\nPlease wait for them to complete the rescue."); return
     note_data = pending_outcome.get(sender, {})
     note      = note_data.get("note") if isinstance(note_data, dict) else None
     pending_completion_photo[sender] = {
@@ -1367,15 +1458,15 @@ def handle_completed(sender, text):
         "was_accepted": (case["status"] == "ACCEPTED"),
     }
     send_message(sender,
-        f"✅ Almost done — one last step.\n\n"
+        f"Almost done -- one last step.\n\n"
         f"Please send a photo of the animal NOW to close case {case_id}.\n\n"
-        "📸 This is mandatory for all Animitr volunteers.\n"
+        "This is mandatory for all Animitr volunteers.\n"
         "It proves the rescue happened and reassures the reporter.\n\n"
         "Send the photo within 30 minutes or the case will be flagged."
     )
     t = threading.Timer(1800, handle_photo_deadline, args=[sender, case_id])
     t.daemon = True; t.start()
-    print(f"Photo deadline started: {case_id} — 30min")
+    print(f"Photo deadline started: {case_id} -- 30min")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1408,14 +1499,12 @@ def compare_photos_with_gemini(report_path, completion_path):
             "Image 1 is the ORIGINAL photo sent when the animal was reported injured.\n"
             "Image 2 is the COMPLETION photo sent by the volunteer after the rescue.\n\n"
             "Answer these two questions:\n"
-            "1. Do both images appear to show the same animal? "
-            "(Same species, similar markings, same injury location if visible)\n"
-            "2. Does the animal in Image 2 appear to be in a safer or better situation? "
-            "(Being held, in a vehicle, at a clinic, or visibly attended to)\n\n"
+            "1. Do both images appear to show the same animal?\n"
+            "2. Does the animal in Image 2 appear to be in a safer or better situation?\n\n"
             "Reply with ONLY one word:\n"
-            "MATCH — same animal, appears helped\n"
-            "NO_MATCH — different animal or clearly unrelated photo\n"
-            "UNCERTAIN — cannot determine clearly"
+            "MATCH -- same animal, appears helped\n"
+            "NO_MATCH -- different animal or clearly unrelated photo\n"
+            "UNCERTAIN -- cannot determine clearly"
         )
         response = gemini_model.generate_content([prompt, report_img, completion_img])
         result = response.text.strip().upper()
@@ -1463,19 +1552,19 @@ def extract_urgency(text):
 def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
     volunteers = load_volunteers()
     if not volunteers:
-        send_message(sender, "⚠️ No volunteers registered yet.\n\n📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027"); return
-    line = ("🔴 URGENT — IMMEDIATE RESPONSE" if urgency=="HIGH" else "🟡 MEDIUM — RESPOND SOON" if urgency=="MEDIUM" else "🟢 LOW — MONITOR SITUATION")
+        send_message(sender, "No volunteers registered yet.\n\nAnimal Helpline: 1962\nSPCA: 011-23619027"); return
+    line = ("URGENT -- IMMEDIATE RESPONSE" if urgency=="HIGH" else "MEDIUM -- RESPOND SOON" if urgency=="MEDIUM" else "LOW -- MONITOR SITUATION")
     ai_text = gemini_analysis
     message = (
-        f"🚨 RESCUE ALERT 🚨\n{line}\n\n📋 Case ID: {case_id}\n\n"
+        f"RESCUE ALERT\n{line}\n\nCase ID: {case_id}\n\n"
         f"Animal: {session.get('animal','?')}\nSeverity: {session.get('severity','?')}/10\n"
         f"Bleeding: {session.get('bleeding','?')}\nCan move: {session.get('can_move','?')}\n"
-        f"Ground support: {session.get('ground_support','?')}\n📍 Location: {session.get('location','?')}\n\n"
+        f"Ground support: {session.get('ground_support','?')}\nLocation: {session.get('location','?')}\n\n"
         f"AI Analysis:\n{ai_text}\n\nReported by: +{sender}"
     )
-    accept_prompt = "👇 COPY TO ACCEPT THIS CASE:"
+    accept_prompt = "COPY TO ACCEPT THIS CASE:"
     accept_command = f"RESPONDING {case_id}"
-    complete_prompt = "👇 COPY WHEN RESCUE IS DONE:"
+    complete_prompt = "COPY WHEN RESCUE IS DONE:"
     complete_command = f"COMPLETED {case_id}"
     alerted = []
     for vol in volunteers:
@@ -1491,7 +1580,7 @@ def alert_volunteers(sender, session, urgency, gemini_analysis, case_id):
     start_escalation_timer(case_id)
     if ADMIN_NUMBER:
         send_message(ADMIN_NUMBER,
-            f"📋 NEW CASE: {case_id}\nAnimal: {session.get('animal','?')} | {urgency}\n"
+            f"NEW CASE: {case_id}\nAnimal: {session.get('animal','?')} | {urgency}\n"
             f"Location: {session.get('location','?')}\nVolunteers alerted: {len(alerted)}"
         )
 
@@ -1512,22 +1601,19 @@ def handle_admin_command(text):
         update_application_status(target, "approved")
 
         approval_msg = (
-            f"✅ Welcome to Animitr, {app['name']}!\n\nYour application has been approved.\n\n"
+            f"Welcome to Animitr, {app['name']}!\n\nYour application has been approved.\n\n"
             "You will now receive rescue alerts.\n\nCommands:\n"
-            "RESPONDING — accept a case\nCOMPLETED CASE-XXXX — close a case\nVSTATUS — check your status\n\n"
-            "⚠️ MANDATORY REQUIREMENT:\nAfter every rescue, you MUST send a photo of the animal "
+            "RESPONDING -- accept a case\nCOMPLETED CASE-XXXX -- close a case\nVSTATUS -- check your status\n\n"
+            "MANDATORY REQUIREMENT:\nAfter every rescue, you MUST send a photo of the animal "
             "before the case closes. This is non-negotiable.\n"
             "5 missed completion photos = permanent ban from the network.\n\n"
-            "Thank you for joining. You are going to save lives. 💚"
+            "Thank you for joining. You are going to save lives."
         )
 
-        # Send WhatsApp message
         send_message(target, approval_msg)
-
-        # V2 SURGICAL: Also notify on Telegram if volunteer registered via Telegram
         notify_volunteer_on_telegram(target, approval_msg)
 
-        return f"✅ Approved: {app['name']} (+{target})"
+        return f"Approved: {app['name']} (+{target})"
 
     elif cmd == "REJECT" and target:
         app = get_application(target)
@@ -1539,13 +1625,10 @@ def handle_admin_command(text):
             "Questions? contact.animitr@gmail.com"
         )
 
-        # Send WhatsApp message
         send_message(target, rejection_msg)
-
-        # V2 SURGICAL: Also notify on Telegram if volunteer registered via Telegram
         notify_volunteer_on_telegram(target, rejection_msg)
 
-        return f"❌ Rejected: {app['name'] if app else ''} (+{target})"
+        return f"Rejected: {app['name'] if app else ''} (+{target})"
 
     elif cmd == "REMOVE_VOL" and target:
         conn = get_db(); cur = conn.cursor()
@@ -1553,15 +1636,15 @@ def handle_admin_command(text):
         conn.commit(); cur.close(); conn.close()
         active_cases.pop(target, None); pending_outcome.pop(target, None)
         send_message(target, "Your Animitr volunteer account has been deactivated.\nContact contact.animitr@gmail.com if you have questions.")
-        return f"🚫 Removed volunteer: +{target}"
+        return f"Removed volunteer: +{target}"
 
     elif cmd == "BLOCK" and target:
         block_number(target, reason)
-        return f"🔒 Blocked: +{target} — {reason or 'no reason'}"
+        return f"Blocked: +{target} -- {reason or 'no reason'}"
 
     elif cmd == "UNBLOCK" and target:
         unblock_number(target)
-        return f"🔓 Unblocked: +{target}"
+        return f"Unblocked: +{target}"
 
     elif cmd == "APPROVE_NGO" and target:
         conn = get_db(); cur = conn.cursor()
@@ -1584,21 +1667,21 @@ def handle_admin_command(text):
                   app_row["email"], app_row["website"], app_row["work_type"], app_row["description"]))
         cur.execute("UPDATE ngo_applications SET status='approved' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
-        return f"✅ NGO approved and now visible on website: {app_row['name']}"
+        return f"NGO approved and now visible on website: {app_row['name']}"
 
     elif cmd == "REJECT_NGO" and target:
         conn = get_db(); cur = conn.cursor()
         cur.execute("UPDATE ngo_applications SET status='rejected' WHERE LOWER(email)=%s;", (target.lower(),))
         conn.commit(); cur.close(); conn.close()
-        return f"❌ NGO application rejected: {target}"
+        return f"NGO application rejected: {target}"
 
     elif cmd == "CLOSE_CASE" and target:
         case = load_case(target)
         if not case: return f"Case {target} not found"
         case["status"] = "COMPLETED"; case["time_completed"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
         case["outcome"] = "Force-closed by admin"; save_case(case)
-        send_message(case["reporter"], f"📋 Your case {target} has been closed by the admin.\nIf you still need help, please submit a new report.")
-        return f"🔒 Force-closed: {target}"
+        send_message(case["reporter"], f"Your case {target} has been closed by the admin.\nIf you still need help, please submit a new report.")
+        return f"Force-closed: {target}"
 
     elif cmd == "ADMIN_STATS":
         conn = get_db(); cur = conn.cursor()
@@ -1608,7 +1691,7 @@ def handle_admin_command(text):
         cur.execute("SELECT COUNT(*) AS t FROM volunteers WHERE status='active';"); vols = cur.fetchone()["t"]
         cur.execute("SELECT COUNT(*) AS t FROM volunteer_applications WHERE status='pending';"); pending = cur.fetchone()["t"]
         cur.close(); conn.close()
-        return (f"📊 ANIMITR STATS\n\nTotal cases: {total}\nCompleted: {done}\nActive: {active}\n"
+        return (f"ANIMITR STATS\n\nTotal cases: {total}\nCompleted: {done}\nActive: {active}\n"
                 f"Active volunteers: {vols}\nPending applications: {pending}\n"
                 f"Completion rate: {round(done/total*100,1) if total else 0}%")
 
@@ -1617,7 +1700,7 @@ def handle_admin_command(text):
         cur.execute("SELECT case_id,animal,urgency,status FROM cases WHERE status IN ('PENDING','ACCEPTED') ORDER BY time_reported DESC LIMIT 10;")
         rows = cur.fetchall(); cur.close(); conn.close()
         if not rows: return "No active cases right now."
-        lines = ["📋 ACTIVE CASES\n"]
+        lines = ["ACTIVE CASES\n"]
         for r in rows: lines.append(f"{r['case_id']} | {r['animal']} | {r['urgency']} | {r['status']}")
         return "\n".join(lines)
 
@@ -1643,7 +1726,7 @@ def process_answer(sender, text):
                 "Please reply with a number between 1 and 10."
             )
         else:
-            send_message(sender, "🚨 ANIMAL RESCUE SYSTEM 🚨\n\nYour number is registered.\nFalse reports = legal action.\n\nGenuine emergency only. Reply YES to proceed.")
+            send_message(sender, "ANIMAL RESCUE SYSTEM\n\nYour number is registered.\nFalse reports = legal action.\n\nGenuine emergency only. Reply YES to proceed.")
 
     elif stage == "severity":
         interpreted = interpret_answer("severity", text)
@@ -1653,7 +1736,7 @@ def process_answer(sender, text):
                 session.update({"severity":severity,"stage":"questions","answered":[],"unclear_count":0})
                 save_session(sender, session)
                 level = "CRITICAL" if severity>=7 else "MODERATE" if severity>=4 else "MILD"
-                send_message(sender, f"Severity {severity}/10 — {level}\n\nWhich animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other — please specify")
+                send_message(sender, f"Severity {severity}/10 -- {level}\n\nWhich animal is it?\n\n1. Dog\n2. Cat\n3. Cow\n4. Horse\n5. Other -- please specify")
                 session["answered"].append("animal"); session["pending_key"] = "animal"; session["pending_qtype"] = "animal"
                 save_session(sender, session)
             else: send_message(sender, "Please enter a number between 1 and 10.")
@@ -1667,14 +1750,14 @@ def process_answer(sender, text):
                 session[pending_key] = "Not sure"
                 session["pending_key"] = None; session["unclear_count"] = 0
                 save_session(sender, session)
-                send_message(sender, "Understood — noted as 'not sure'. Moving on.")
+                send_message(sender, "Understood -- noted as 'not sure'. Moving on.")
                 advance_to_next(sender, session)
                 return
             if interpreted == "UNCLEAR" and pending_qtype == "yes_no":
                 session[pending_key] = "Not sure"
                 session["pending_key"] = None; session["unclear_count"] = 0
                 save_session(sender, session)
-                send_message(sender, "Understood — noted as 'not sure'. Moving on.")
+                send_message(sender, "Understood -- noted as 'not sure'. Moving on.")
                 advance_to_next(sender, session)
                 return
             if interpreted == "UNCLEAR":
@@ -1720,15 +1803,15 @@ def process_answer(sender, text):
     elif stage == "location":
         if not is_valid_location(text):
             send_message(sender,
-                "⚠️ Location not accepted.\n\nPlease provide a proper address:\n• Area or colony name\n• Nearby landmark\n• City name\n\n"
-                "Example: Near Sector 5 Metro, Rohini, New Delhi\n\nOr share your live location using the 📎 button.\n\nAccurate location = faster rescue:"
+                "Location not accepted.\n\nPlease provide a proper address:\nArea or colony name\nNearby landmark\nCity name\n\n"
+                "Example: Near Sector 5 Metro, Rohini, New Delhi\n\nOr share your live location using the attachment button.\n\nAccurate location = faster rescue:"
             ); return
         session["location"] = text.strip(); session["stage"] = "photo"; save_session(sender, session)
-        send_message(sender, "📍 Location confirmed!\n\nNow send a clear photo of the animal.\n\nTips:\n• Get as close as safely possible\n• Make sure animal is clearly visible\n• Good lighting helps AI analysis\n\nSend photo now 📸")
+        send_message(sender, "Location confirmed!\n\nNow send a clear photo of the animal.\n\nTips:\nGet as close as safely possible\nMake sure animal is clearly visible\nGood lighting helps AI analysis\n\nSend photo now")
 
     elif stage == "photo":
         send_message(sender,
-            "📸 Please send a photo only to continue.\n\n"
+            "Please send a photo only to continue.\n\n"
             "Text is not accepted at this step.\n"
             "Use the camera/gallery button and share the animal photo."
         )
@@ -1742,21 +1825,21 @@ def process_answer(sender, text):
                 if isinstance(cd,dict) and cd.get("reporter") == sender:
                     vol_w = vn; vols = load_volunteers(); vol_name_w = vols.get(vn,{}).get("name","Volunteer"); break
             if vol_w: connect_reporter_volunteer(sender, vol_w, vol_name_w)
-            else: send_message(sender, "🙏 Thank you for staying.\nYou will be notified the moment a volunteer accepts.")
+            else: send_message(sender, "Thank you for staying.\nYou will be notified the moment a volunteer accepts.")
             clear_reporter_session(sender)
         elif text.upper() == "LEAVE" or interpreted == "NO":
             waiting_reporters[sender] = False
-            send_message(sender, "Understood. Thank you for reporting. Help is on the way. 🐾\n\nYou will receive an update when a volunteer reaches the animal.")
+            send_message(sender, "Understood. Thank you for reporting. Help is on the way.\n\nYou will receive an update when a volunteer reaches the animal.")
             for vn, cd in list(pending_volunteer_responses.items()):
                 if isinstance(cd,dict) and cd.get("reporter") == sender:
-                    send_message(vn, f"⚠️ Reporter has left the location.\nPlease proceed urgently.\nReporter: +{sender}")
+                    send_message(vn, f"Reporter has left the location.\nPlease proceed urgently.\nReporter: +{sender}")
                     pending_volunteer_responses.pop(vn,None); active_cases.pop(vn,None); break
             clear_reporter_session(sender)
         else: send_message(sender, "Please reply STAY (waiting with animal) or LEAVE (leaving).")
 
     else:
         save_session(sender, {"stage":"warning"})
-        send_message(sender, "🚨 ANIMAL RESCUE SYSTEM 🚨\n\nYour number is registered.\nGenuine emergency only. Reply YES to proceed.")
+        send_message(sender, "ANIMAL RESCUE SYSTEM\n\nYour number is registered.\nGenuine emergency only. Reply YES to proceed.")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1789,11 +1872,11 @@ def webhook():
             if text_up == "VSTATUS":
                 vstatus = get_volunteer_status(sender)
                 msgs = {
-                    "active":   "✅ You are an active Animitr volunteer.\n\nYou will receive rescue alerts.\n\nCommands:\nRESPONDING — accept a case\nCOMPLETED CASE-XXXX — close a case",
-                    "pending":  "⏳ Your application is under review.\n\nWe will contact you for a verification call.\nThis usually takes 1-3 days.\n\nQuestions? contact.animitr@gmail.com",
+                    "active":   "You are an active Animitr volunteer.\n\nYou will receive rescue alerts.\n\nCommands:\nRESPONDING -- accept a case\nCOMPLETED CASE-XXXX -- close a case",
+                    "pending":  "Your application is under review.\n\nWe will contact you for a verification call.\nThis usually takes 1-3 days.\n\nQuestions? contact.animitr@gmail.com",
                     "rejected": "Your volunteer application was not approved.\n\nContact: contact.animitr@gmail.com",
                     "inactive": "Your volunteer account is inactive.\n\nContact: contact.animitr@gmail.com to reactivate.",
-                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page\n\nText VSTATUS after applying to check your status.",
+                    "not_found":"You are not registered as a volunteer.\n\nTo apply, visit:\nanimitr.org -- Volunteer page\n\nText VSTATUS after applying to check your status.",
                 }
                 send_message(sender, msgs.get(vstatus, msgs["not_found"])); return "OK", 200
 
@@ -1822,11 +1905,11 @@ def webhook():
                 else:
                     pending_transfer.pop(sender, None)
                     send_message(sender,
-                        f"✅ Confirmed — you are still active on case {cid}.\n\n"
+                        f"Confirmed -- you are still active on case {cid}.\n\n"
                         "Please send us an update:\n"
-                        "• STILL_ON_SCENE — still at location, rescue in progress\n"
-                        f"• COMPLETED {cid} — rescue is complete\n"
-                        "• Your outcome note (e.g. 'Taken to vet, stable')\n\n"
+                        "STILL_ON_SCENE -- still at location, rescue in progress\n"
+                        f"COMPLETED {cid} -- rescue is complete\n"
+                        "Your outcome note (e.g. 'Taken to vet, stable')\n\n"
                         f"Case will be monitored. Complete with: COMPLETED {cid}"
                     )
                     extension = 600 if urgency == "HIGH" else 1500
@@ -1841,15 +1924,15 @@ def webhook():
             if text_up == "RESPONDING" or text_up.startswith("RESPONDING "):
                 vols = load_volunteers()
                 if sender not in vols:
-                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.org → Volunteer page"); return "OK", 200
+                    send_message(sender, "You are not a registered volunteer.\n\nTo apply, visit:\nanimitr.org -- Volunteer page"); return "OK", 200
                 parts_r = text_up.strip().split()
                 provided_case_id = parts_r[1] if len(parts_r) >= 2 else None
                 if provided_case_id:
                     case_check = load_case(provided_case_id)
                     if not case_check:
-                        send_message(sender, f"❌ Case {provided_case_id} not found.\n\nCheck the Case ID in your rescue alert and try again."); return "OK", 200
+                        send_message(sender, f"Case {provided_case_id} not found.\n\nCheck the Case ID in your rescue alert and try again."); return "OK", 200
                     if case_check["status"] == "COMPLETED":
-                        send_message(sender, f"Case {provided_case_id} is already completed. 🐾"); return "OK", 200
+                        send_message(sender, f"Case {provided_case_id} is already completed."); return "OK", 200
                     if case_check["status"] == "ACCEPTED" and case_check.get("volunteer_number") != sender:
                         send_message(sender, f"Case {provided_case_id} has already been accepted by another volunteer."); return "OK", 200
                     cd = {"reporter": case_check["reporter"], "case_id": provided_case_id}
@@ -1865,9 +1948,9 @@ def webhook():
                             cd = {"reporter": rows_r[0]["reporter"], "case_id": rows_r[0]["case_id"]}
                             active_cases[sender] = cd
                         elif len(rows_r) > 1:
-                            case_list = "\n".join([f"• RESPONDING {r['case_id']}" for r in rows_r])
+                            case_list = "\n".join([f"RESPONDING {r['case_id']}" for r in rows_r])
                             send_message(sender,
-                                f"⚠️ You have {len(rows_r)} active cases. Please specify which one:\n\n{case_list}\n\nCopy and send the exact line above."
+                                f"You have {len(rows_r)} active cases. Please specify which one:\n\n{case_list}\n\nCopy and send the exact line above."
                             ); return "OK", 200
                     if cd and isinstance(cd, dict):
                         handle_responding(sender, vols[sender]["name"], cd)
@@ -1877,9 +1960,9 @@ def webhook():
 
             if text_up == "JOIN":
                 send_message(sender,
-                    "🐾 Thank you for your interest in volunteering!\n\n"
+                    "Thank you for your interest in volunteering!\n\n"
                     "Volunteer registration is done through our website.\n\n"
-                    "Visit: animitr.org → Volunteer page\n\n"
+                    "Visit: animitr.org -- Volunteer page\n\n"
                     "Fill in the form. We will contact you for a verification call before approving you.\n\n"
                     "Text VSTATUS anytime to check your application status."
                 ); return "OK", 200
@@ -1887,7 +1970,7 @@ def webhook():
             if text_up == "REPORT":
                 save_session(sender, {"stage":"warning"})
                 send_message(sender,
-                    "🚨 ANIMAL RESCUE SYSTEM 🚨\n\n"
+                    "ANIMAL RESCUE SYSTEM\n\n"
                     "Your number is registered.\n"
                     "False reports result in legal action.\n\n"
                     "Genuine emergency only. Reply YES to proceed."
@@ -1908,7 +1991,7 @@ def webhook():
             lat = message["location"]["latitude"]; lng = message["location"]["longitude"]
             session["location"] = f"https://maps.google.com/?q={lat},{lng}"
             session["stage"] = "photo"; save_session(sender, session)
-            send_message(sender, "📍 Live location received!\n\nNow send a clear photo of the animal 📸")
+            send_message(sender, "Live location received!\n\nNow send a clear photo of the animal")
 
         elif message["type"] == "image":
             session = load_session(sender); vols = load_volunteers()
@@ -1924,15 +2007,15 @@ def webhook():
                     ok = download_image(image_url, comp_path)
                     if not ok:
                         pending_completion_photo[sender] = data
-                        send_message(sender, "⚠️ Could not download your photo. Please try sending it again."); return "OK", 200
-                    send_message(sender, "📸 Photo received. Running verification...")
+                        send_message(sender, "Could not download your photo. Please try sending it again."); return "OK", 200
+                    send_message(sender, "Photo received. Running verification...")
                     report_path = f"report_{cid}.jpg"
                     import os as _os
                     if _os.path.exists(report_path):
                         photo_result = compare_photos_with_gemini(report_path, comp_path)
                     else:
                         photo_result = "UNCERTAIN"
-                        print(f"Report photo missing for {cid} — skipping comparison")
+                        print(f"Report photo missing for {cid} -- skipping comparison")
                     finalize_case_closure(sender, cid, note, was_acc, photo_result)
                 return "OK", 200
 
@@ -1944,20 +2027,20 @@ def webhook():
                     download_image(image_url, path)
                     case = load_case(cid)
                     if case:
-                        upload_and_send_photo(case["reporter"], path, "📸 Progress photo from your volunteer")
-                        send_message(sender, "✅ Photo shared with the reporter as a progress update.")
+                        upload_and_send_photo(case["reporter"], path, "Progress photo from your volunteer")
+                        send_message(sender, "Photo shared with the reporter as a progress update.")
                     return "OK", 200
 
             if sender in vols and session.get("stage") != "photo": return "OK", 200
             if session.get("stage") == "location":
-                send_message(sender, "Please share your location first 📍"); return "OK", 200
+                send_message(sender, "Please share your location first"); return "OK", 200
             if session.get("stage") != "photo":
                 send_message(sender, "Please answer all questions first before sending a photo."); return "OK", 200
-            send_message(sender, "📸 Photo received. Analysing with AI...")
+            send_message(sender, "Photo received. Analysing with AI...")
             image_url = get_image_url(message["image"]["id"])
             ok = download_image(image_url)
             if not ok:
-                send_message(sender, "⚠️ Could not download your photo.\n\nPlease try sending it again."); return "OK", 200
+                send_message(sender, "Could not download your photo.\n\nPlease try sending it again."); return "OK", 200
             user_answers = (
                 f"Animal: {session.get('animal','?')}\nSeverity: {session.get('severity','?')}/10\n"
                 f"Bleeding: {session.get('bleeding','?')}\nCan move: {session.get('can_move','?')}\n"
@@ -1978,13 +2061,13 @@ def webhook():
                 print(f"Report photo saved: {report_path}, received.jpg deleted")
             except Exception as e:
                 print(f"Report photo copy error: {e}")
-            send_message(sender, f"📋 Your Case ID: {case_id}\n\nSave this — check status anytime:\nSTATUS {case_id}")
+            send_message(sender, f"Your Case ID: {case_id}\n\nSave this -- check status anytime:\nSTATUS {case_id}")
             if urgency == "HIGH":
-                send_message(sender, "🚨 HIGH URGENCY case created.\n\nDispatched to rescue team immediately.\nPlease stay with the animal if safe to do so.")
+                send_message(sender, "HIGH URGENCY case created.\n\nDispatched to rescue team immediately.\nPlease stay with the animal if safe to do so.")
             elif urgency == "MEDIUM":
-                send_message(sender, "✅ Report dispatched to rescue team.\n\nA volunteer will respond soon.\nPlease stay close to the animal if possible.")
+                send_message(sender, "Report dispatched to rescue team.\n\nA volunteer will respond soon.\nPlease stay close to the animal if possible.")
             else:
-                send_message(sender, "✅ Report sent to rescue team.\n\nA volunteer will check on the animal.\nThank you for reporting.")
+                send_message(sender, "Report sent to rescue team.\n\nA volunteer will check on the animal.\nThank you for reporting.")
             session["stage"] = "waiting"; save_session(sender, session)
             send_first_aid(sender, session)
             threading.Thread(
@@ -2080,14 +2163,14 @@ def api_register_volunteer():
         if existing == "pending": return jsonify({"error":"Your application is already pending review. Text VSTATUS to check."}), 400
         save_application(phone, name, city, tier)
         send_message(phone,
-            f"🐾 Thank you for applying to Animitr, {name}!\n\n"
+            f"Thank you for applying to Animitr, {name}!\n\n"
             "Your application has been received.\n\n"
-            "Next steps:\n→ Our team will review your application\n→ We will contact you for a verification call\n→ Once verified, you will be approved\n\n"
+            "Next steps:\nOur team will review your application\nWe will contact you for a verification call\nOnce verified, you will be approved\n\n"
             "This usually takes 1-3 days.\n\nText VSTATUS anytime to check your status.\n\nQuestions? contact.animitr@gmail.com"
         )
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"🆕 NEW VOLUNTEER APPLICATION\n\nName: {name}\nPhone: +{phone}\nCity: {city}\nTier: {tier}\n\n"
+                f"NEW VOLUNTEER APPLICATION\n\nName: {name}\nPhone: +{phone}\nCity: {city}\nTier: {tier}\n\n"
                 f"After your KYC call:\nAPPROVE {phone}\nREJECT {phone}"
             )
         return jsonify({"success":True,"message":"Application received. We will contact you for verification."})
@@ -2146,7 +2229,7 @@ def api_register_ngo():
         conn.commit(); cur.close(); conn.close()
         if ADMIN_NUMBER:
             send_message(ADMIN_NUMBER,
-                f"🏢 NEW NGO APPLICATION\n\nName: {name}\nCity: {city}\nEmail: {email}\n"
+                f"NEW NGO APPLICATION\n\nName: {name}\nCity: {city}\nEmail: {email}\n"
                 f"Website: {website or 'Not provided'}\nWork: {work_type}\n\n"
                 f"After KYC:\nAPPROVE_NGO {email}\nREJECT_NGO {email}"
             )
