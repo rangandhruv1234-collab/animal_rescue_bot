@@ -283,8 +283,39 @@ def count_active_cases_for_reporter(reporter):
 
 
 # ══════════════════════════════════════════════════════════════════
-# RATE LIMITING
+# TG SESSION — DB BACKED (prevents question skipping)
 # ══════════════════════════════════════════════════════════════════
+
+def load_tg_session(chat_id):
+    """Load Telegram reporter session from PostgreSQL."""
+    key = f"tgsess_{chat_id}"
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT session_data FROM sessions WHERE phone_number=%s;", (key,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row: return {}
+    try:
+        return json.loads(row["session_data"])
+    except:
+        return {}
+
+def save_tg_session(chat_id, data):
+    """Save Telegram reporter session to PostgreSQL."""
+    key = f"tgsess_{chat_id}"
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (phone_number, stage, session_data, updated_at)
+        VALUES (%s, 'tg_flow', %s, NOW())
+        ON CONFLICT (phone_number) DO UPDATE SET
+            session_data=EXCLUDED.session_data, updated_at=NOW();
+    """, (key, json.dumps(data)))
+    conn.commit(); cur.close(); conn.close()
+
+def delete_tg_session(chat_id):
+    """Delete Telegram reporter session from PostgreSQL."""
+    key = f"tgsess_{chat_id}"
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE phone_number=%s;", (key,))
+    conn.commit(); cur.close(); conn.close()
 
 def is_rate_limited(chat_id):
     now        = datetime.now()
@@ -535,10 +566,9 @@ def confirm_rescue_keyboard():
     ])
 
 def volunteer_action_keyboard(case_id):
-    # FIX 1: Added COMPLETED button alongside ACCEPT button
+    # Only ACCEPT button shown in initial alert — COMPLETED comes after accepting
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✅ Accept Case {case_id}", callback_data=f"vol_accept_{case_id}")],
-        [InlineKeyboardButton(f"✅ COMPLETED {case_id}",   callback_data=f"done_{case_id}")],
     ])
 
 def volunteer_active_keyboard(case_id):
@@ -1059,7 +1089,7 @@ async def ask_next_question(bot, chat_id, session):
         else:
             session["wounds"]     = "Not checked"
             session["flow_stage"] = "eating"
-            tg_sessions[chat_id]  = session
+            save_tg_session(chat_id, session)
             await ask_next_question(bot, chat_id, session)
     elif stage == "eating":
         sev = session.get("severity_num", 5)
@@ -1071,7 +1101,7 @@ async def ask_next_question(bot, chat_id, session):
         else:
             session["eating"]     = "Not checked"
             session["flow_stage"] = "ground_support"
-            tg_sessions[chat_id]  = session
+            save_tg_session(chat_id, session)
             await ask_next_question(bot, chat_id, session)
     elif stage == "ground_support":
         await send_tg(bot, chat_id,
@@ -1089,7 +1119,7 @@ async def ask_next_question(bot, chat_id, session):
             parse_mode="Markdown"
         )
         session["flow_stage"] = "location"
-        tg_sessions[chat_id]  = session
+        save_tg_session(chat_id, session)
     elif stage == "photo":
         await send_tg(bot, chat_id,
             "📸 Almost done!\n\nPlease send a clear photo of the animal.\n\n"
@@ -1098,7 +1128,7 @@ async def ask_next_question(bot, chat_id, session):
             "• Good lighting helps AI analysis"
         )
         session["flow_stage"] = "photo"
-        tg_sessions[chat_id]  = session
+        save_tg_session(chat_id, session)
 
 
 def get_next_flow_stage(session):
@@ -1167,7 +1197,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_admin_tg_command(chat_id, text, context.bot)
             return
 
-    session = tg_sessions.get(chat_id, {})
+    session = load_tg_session(chat_id)
     stage   = session.get("stage","")
     flow    = session.get("flow_stage","")
 
@@ -1245,7 +1275,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         session["location"]   = text
         session["flow_stage"] = "photo"
-        tg_sessions[chat_id]  = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             "📍 Location confirmed!\n\nNow send a clear photo of the animal 📸"
         )
@@ -1265,7 +1295,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         session["vol_name"] = name
         session["stage"]    = "vol_entering_city"
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             f"Got it, {name}!\n\nWhich city are you based in?\n\n(Type your city name)"
         )
@@ -1274,7 +1304,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif stage == "vol_entering_city":
         session["vol_city"] = text.strip()
         session["stage"]    = "vol_entering_phone"
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             "Please share your *WhatsApp number* so we can contact you for verification.\n\n"
             "Format: 91XXXXXXXXXX (with country code, no + or spaces)\n\n"
@@ -1298,7 +1328,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_status = get_volunteer_status(wa_number)
         if existing_status == "active":
             session["stage"] = ""
-            tg_sessions[chat_id] = session
+            save_tg_session(chat_id, session)
             await send_tg(context.bot, chat_id,
                 "✅ This WhatsApp number is already an approved volunteer!\n\n"
                 "You will receive rescue alerts on WhatsApp.\n\n"
@@ -1308,7 +1338,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if existing_status == "pending":
             session["stage"] = ""
-            tg_sessions[chat_id] = session
+            save_tg_session(chat_id, session)
             await send_tg(context.bot, chat_id,
                 "⏳ An application for this WhatsApp number is already under review.\n\n"
                 "You'll be contacted for verification. Usually 1-3 days.",
@@ -1318,7 +1348,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_application(wa_number, name, city, "community", tg_id=chat_id)
         session["stage"] = ""
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
 
         await send_tg(context.bot, chat_id,
             f"🐾 Thank you for applying, {name}!\n\n"
@@ -1358,7 +1388,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stage == "waiting_case_id":
         await show_case_status(chat_id, text.strip().upper(), context.bot)
         session["stage"] = ""
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         return
 
     await send_tg(context.bot, chat_id,
@@ -1372,7 +1402,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_blocked_tg(chat_id): return
     if is_rate_limited(chat_id): return
 
-    session    = tg_sessions.get(chat_id, {})
+    session    = load_tg_session(chat_id)
     flow       = session.get("flow_stage","")
     tg_phone   = f"tg_{chat_id}"
     real_phone = get_tg_id_for_chat(chat_id)
@@ -1491,7 +1521,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     session["case_id"]    = case_id
     session["stage"]      = "waiting"
     session["flow_stage"] = "done"
-    tg_sessions[chat_id]  = session
+    save_tg_session(chat_id, session)
 
     await send_tg(context.bot, chat_id,
         f"📋 *Your Case ID: {case_id}*\n\nSave this to check status anytime.\n\nUse: /status",
@@ -1515,7 +1545,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    session = tg_sessions.get(chat_id, {})
+    session = load_tg_session(chat_id)
     flow    = session.get("flow_stage","")
 
     if flow != "location":
@@ -1526,7 +1556,7 @@ async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_
     lng = update.message.location.longitude
     session["location"]   = f"https://maps.google.com/?q={lat},{lng}"
     session["flow_stage"] = "photo"
-    tg_sessions[chat_id]  = session
+    save_tg_session(chat_id, session)
 
     await send_tg(context.bot, chat_id,
         "📍 Live location received!\n\nNow send a clear photo of the animal 📸"
@@ -1547,11 +1577,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked_tg(chat_id): return
     if is_rate_limited(chat_id): return
 
-    session = tg_sessions.get(chat_id, {})
+    session = load_tg_session(chat_id)
 
     if data == "action_report":
         session = {"stage": "reporting", "flow_stage": "animal"}
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             "🚨 *ANIMAL RESCUE REPORT*\n\n"
             "Your report is being registered. False reports result in action.\n\n"
@@ -1572,7 +1602,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "action_status":
         session["stage"] = "waiting_case_id"
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             "Please type your Case ID.\nExample: CASE-1704-AB12CD"
         )
@@ -1600,7 +1630,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         animal               = animal_map.get(data, "Other")
         session["animal"]    = animal
         session["flow_stage"] = get_next_flow_stage(session)
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id, f"✅ Animal: {animal}")
         await ask_next_question(context.bot, chat_id, session)
         return
@@ -1612,7 +1642,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label_map = {"YES":"Yes ✅", "NO":"No ❌", "NOT_SURE":"Not Sure 🤷"}
         session[key]          = value
         session["flow_stage"] = get_next_flow_stage(session)
-        tg_sessions[chat_id]  = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             f"✅ {key.replace('_',' ').title()}: {label_map.get(value,value)}"
         )
@@ -1625,7 +1655,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["severity"]     = sev_label
         session["severity_num"] = sev_num
         session["flow_stage"]   = get_next_flow_stage(session)
-        tg_sessions[chat_id]    = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id, f"✅ Severity: {sev_label}")
         await ask_next_question(context.bot, chat_id, session)
         return
@@ -1646,7 +1676,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         session["stage"]      = "waiting"
         session["flow_stage"] = "done"
-        tg_sessions[chat_id]  = session
+        save_tg_session(chat_id, session)
         return
 
     if data == "vol_apply":
@@ -1666,7 +1696,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         session["stage"] = "vol_entering_name"
-        tg_sessions[chat_id] = session
+        save_tg_session(chat_id, session)
         await send_tg(context.bot, chat_id,
             "Great! Let's get you registered as a volunteer.\n\n"
             "First, what is your *full name*?",
