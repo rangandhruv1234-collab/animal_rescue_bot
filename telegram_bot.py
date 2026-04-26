@@ -2059,6 +2059,22 @@ async def handle_reporter_confirm(chat_id, reply, bot):
 
     if reply in ("YES","Y"):
         cleanup()
+        # Update case — mark reporter confirmed
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE cases SET reporter_confirmed='YES', status='COMPLETED'
+                WHERE case_id=%s;
+            """, (case_id,))
+            # Increment volunteer rescue count
+            if vol_phone and was_accepted and not photo_missing:
+                cur.execute("""
+                    UPDATE volunteers SET total_rescues = total_rescues + 1
+                    WHERE phone_number=%s;
+                """, (vol_phone,))
+            conn.commit(); cur.close(); conn.close()
+        except Exception as e:
+            logger.error(f"TG confirm YES DB error: {e}")
         await send_tg(bot, chat_id,
             f"✅ Thank you for confirming.\n\nCase {case_id} is now fully verified.\n\n"
             "Your report saved an animal today. 🐾",
@@ -2072,6 +2088,22 @@ async def handle_reporter_confirm(chat_id, reply, bot):
 
     elif reply in ("NO","N"):
         cleanup()
+        # Update case — reporter denied
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE cases SET reporter_confirmed='NO', status='DISPUTED'
+                WHERE case_id=%s;
+            """, (case_id,))
+            # Reverse volunteer rescue count
+            if was_accepted and not photo_missing and vol_phone:
+                cur.execute("""
+                    UPDATE volunteers SET total_rescues = GREATEST(total_rescues - 1, 0)
+                    WHERE phone_number=%s;
+                """, (vol_phone,))
+            conn.commit(); cur.close(); conn.close()
+        except Exception as e:
+            logger.error(f"TG confirm NO DB error: {e}")
         await send_tg(bot, chat_id,
             f"⚠️ Thank you for letting us know.\n\n"
             "Our team has been alerted and will investigate.\n\n"
@@ -2079,13 +2111,6 @@ async def handle_reporter_confirm(chat_id, reply, bot):
             "📞 Animal Helpline: 1962\n📞 SPCA: 011-23619027",
             keyboard=main_menu_keyboard()
         )
-        if was_accepted and not photo_missing:
-            conn = get_db(); cur = conn.cursor()
-            cur.execute("""
-                UPDATE volunteers SET total_rescues = GREATEST(total_rescues - 1, 0)
-                WHERE phone_number = %s;
-            """, (vol_phone,))
-            conn.commit(); cur.close(); conn.close()
         if ADMIN_TG_ID:
             await send_tg(bot, int(ADMIN_TG_ID),
                 f"🚨 REPORTER DENIED RESCUE: {case_id}\nVolunteer: {vol_name}\n"
@@ -2095,6 +2120,16 @@ async def handle_reporter_confirm(chat_id, reply, bot):
 
     elif reply in ("UNSURE",):
         cleanup()
+        # Update case — reporter unsure
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE cases SET reporter_confirmed='UNSURE'
+                WHERE case_id=%s;
+            """, (case_id,))
+            conn.commit(); cur.close(); conn.close()
+        except Exception as e:
+            logger.error(f"TG confirm UNSURE DB error: {e}")
         await send_tg(bot, chat_id,
             f"Understood. We've logged your uncertainty for case {case_id}.\n\n"
             "Our team will review. Thank you.",
