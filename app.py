@@ -134,6 +134,7 @@ def init_db():
             alerted_volunteers TEXT DEFAULT '[]',
             outcome            TEXT,
             completion_photo   BOOLEAN DEFAULT FALSE,
+            reporter_confirmed TEXT DEFAULT 'PENDING',
             time_reported      TEXT,
             time_accepted      TEXT,
             time_completed     TEXT
@@ -179,6 +180,11 @@ def init_db():
             approved_at  TIMESTAMP DEFAULT NOW(),
             visible      BOOLEAN DEFAULT TRUE
         );""")
+
+    # Migration: add reporter_confirmed column if it doesn't exist
+    cur.execute("""
+        ALTER TABLE cases ADD COLUMN IF NOT EXISTS reporter_confirmed TEXT DEFAULT 'PENDING';
+    """)
 
     conn.commit(); cur.close(); conn.close()
     print("DB initialised.")
