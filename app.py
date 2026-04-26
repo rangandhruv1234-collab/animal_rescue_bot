@@ -2298,6 +2298,14 @@ def api_register_volunteer():
                 f"NEW VOLUNTEER APPLICATION\n\nName: {name}\nPhone: +{phone}\nCity: {city}\nTier: {tier}\n\n"
                 f"After your KYC call:\nAPPROVE {phone}\nREJECT {phone}"
             )
+        if ADMIN_TG_ID:
+            send_telegram_message(int(ADMIN_TG_ID),
+                f"🆕 NEW VOLUNTEER APPLICATION (Website)\n\n"
+                f"Name: {name}\nPhone: +{phone}\nCity: {city}\nTier: {tier}\n\n"
+                f"After KYC call, send on Telegram:\n"
+                f"APPROVE {phone}\n"
+                f"REJECT {phone}"
+            )
         return jsonify({"success":True,"message":"Application received. We will contact you for verification."})
     except Exception as e:
         print("API /register-volunteer error:", e); return jsonify({"error":"Registration failed"}), 500
